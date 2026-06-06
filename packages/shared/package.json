@@ -1,0 +1,41 @@
+{
+  "name": "@pathrule/shared",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./skills/agent-targets.js": "./src/skills/agent-targets.ts",
+    "./mcp-installers/registry.js": "./src/mcp-installers/registry.ts",
+    "./local-runtime/paths.js": "./src/local-runtime/paths.ts",
+    "./local-runtime/hook-index-writer.js": "./src/local-runtime/hook-index-writer.ts",
+    "./local-runtime/managed-file-ownership.js": "./src/local-runtime/managed-file-ownership.ts",
+    "./content-types.js": "./src/content-types.ts",
+    "./node-types.js": "./src/node-types.ts",
+    "./path-compare.js": "./src/path-compare.ts",
+    "./pathrule-protocol.js": "./src/pathrule-protocol.ts",
+    "./routing-types.js": "./src/routing-types.ts",
+    "./semantic-tags.js": "./src/semantic-tags.ts",
+    "./intelligence/types.js": "./src/intelligence/types.ts",
+    "./hook-supervisor/types.js": "./src/hook-supervisor/types.ts",
+    "./hook-supervisor/matcher.js": "./src/hook-supervisor/matcher.ts",
+    "./hook-supervisor/hook-command.js": "./src/hook-supervisor/hook-command.ts",
+    "./tools/node-path.js": "./src/tools/node-path.ts",
+    "./tools/overview.js": "./src/tools/overview.ts",
+    "./tools/refresh-types.js": "./src/tools/refresh-types.ts",
+    "./tools/dedup-types.js": "./src/tools/dedup-types.ts",
+    "./mcp-types.js": "./src/mcp-types.ts",
+    "./local-runtime/atomic-write.js": "./src/local-runtime/atomic-write.ts"
+  },
+  "dependencies": {
+    "@pathrule/core": "workspace:*",
+    "smol-toml": "^1.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.7.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -1,0 +1,7 @@
+# Default reviewers for Pathrule Core. The maintainers are requested on every PR.
+# (Adjust the team/handle when the public org is finalized.)
+*                       @pathrule/maintainers
+
+# The backend seam + the SQLite backend are the load-bearing surface — review carefully.
+/packages/core/src/backend/knowledge-backend.ts   @pathrule/maintainers
+/packages/core/src/backend/local/                  @pathrule/maintainers

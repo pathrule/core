@@ -1,0 +1,21 @@
+{
+  "name": "@pathrule/cli-local",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "The open local (no-login) command modules of the Pathrule CLI: init --local, setup --local, local content browsing, and the offline hook wiring. The published @pathrule/cli composes these with its cloud half.",
+  "dependencies": {
+    "@pathrule/core": "workspace:*",
+    "@pathrule/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  }
+}

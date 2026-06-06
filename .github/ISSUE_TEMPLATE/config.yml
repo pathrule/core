@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/pathrule/core/security/policy
+    about: Do not file security issues publicly - see the security policy.
+  - name: Pathrule Cloud (hosted / team edition)
+    url: https://pathrule.io
+    about: Questions about the paid hosted edition (team sync, AI curation, GUI) belong on the website, not this repo.

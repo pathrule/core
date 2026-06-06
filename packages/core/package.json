@@ -1,0 +1,31 @@
+{
+  "name": "@pathrule/core",
+  "version": "0.0.0",
+  "description": "The context layer for AI coding agents: path-scoped memories, rules, and skills on an embedded local SQLite backend.",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7",
+    "@types/node": "^25.6.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2"
+  },
+  "dependencies": {
+    "@pathrule/shared": "workspace:*",
+    "better-sqlite3": "^11"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pathrule/core"
+  }
+}
