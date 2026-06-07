@@ -13,6 +13,8 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+
+import { resolveSqliteNativeBinding } from "./native-binding.js";
 import {
   pathruleHome,
   PATHRULE_DIR_MODE,
@@ -239,7 +241,8 @@ export class LocalBackend implements KnowledgeBackend {
   private readonly semanticEnabled: boolean;
 
   constructor(path = ":memory:", options: LocalBackendOptions = {}) {
-    this.db = new Database(path);
+    const nativeBinding = resolveSqliteNativeBinding();
+    this.db = new Database(path, nativeBinding ? { nativeBinding } : {});
     if (path !== ":memory:") {
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("busy_timeout = 5000");
@@ -304,7 +307,8 @@ export class LocalBackend implements KnowledgeBackend {
       if (!existsSync(dbPath)) continue;
       let db: Db | undefined;
       try {
-        db = new Database(dbPath, { readonly: true });
+        const nativeBinding = resolveSqliteNativeBinding();
+        db = new Database(dbPath, { readonly: true, ...(nativeBinding ? { nativeBinding } : {}) });
         const row = db
           .prepare(
             "SELECT id, local_root_path FROM workspaces WHERE local_root_path IS NOT NULL LIMIT 1",
