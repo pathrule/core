@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  Works with <strong>Claude Code</strong>, <strong>Cursor</strong>, <strong>Codex</strong>, <strong>Windsurf</strong>, and any MCP client.
+  Works with <strong>Claude Code</strong>, <strong>GitHub Copilot</strong>, <strong>Cursor</strong>, <strong>Codex</strong>, <strong>Windsurf</strong>, and any MCP client.
 </p>
 
 ---
@@ -76,6 +76,20 @@ pathrule search "deploy" --local
 > **Does the CLI need an account?** No. Local mode is complete and account-free; what you just
 > installed runs 100% offline. An account only exists for [Pathrule Cloud](#-editions),
 > the paid team edition. Until you log in, no cloud code path is ever taken.
+
+### 🧩 Prefer the editor? Install the VSCode extension
+
+[**Pathrule for VSCode**](https://marketplace.visualstudio.com/items?itemName=Pathrule.pathrule-vscode)
+ships the same local engine inside the editor, still account-free:
+
+- a **knowledge map** sidebar that follows your active file and shows exactly what your agent
+  receives on each path, with count badges in the Explorer;
+- memories, rules and skills open as **markdown tabs** (save persists, conflicts are never silent);
+- right-click any file or folder → **Pathrule** → browse the knowledge an AI session there
+  would receive, or scope a new memory/rule/skill in two keystrokes;
+- **Connect AI Clients**: GitHub Copilot agent mode registers automatically; Claude Code,
+  Cursor, Codex and Windsurf get managed MCP entries plus context hooks, no JSON editing;
+- works on the same `~/.pathrule` store as the CLI: one identity, one knowledge base.
 
 ## 🧠 How it works
 
