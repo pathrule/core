@@ -78,3 +78,51 @@ export const CLAUDE_TO_CODEX_TOOL_MAP: Record<string, string> = {
 export const CODEX_TO_CLAUDE_TOOL_MAP: Record<string, string> = {
   apply_patch: "Edit",
 };
+
+// ─── GitHub Copilot (docs.github.com/en/copilot/reference/hooks-configuration) ─
+// Copilot's native hook config uses camelCase event names; VS Code agent mode
+// converts them to PascalCase internally and the cloud coding agent reads the
+// same `.github/hooks/*.json` file. `UserPromptSubmit` is deliberately
+// unmapped: Copilot's userPromptSubmitted accepts no context output on any
+// surface, so wiring it would burn one process per prompt for zero injection
+// (same reasoning as Cursor's beforeSubmitPrompt).
+export type CopilotHookEventName =
+  | "sessionStart"
+  | "sessionEnd"
+  | "userPromptSubmitted"
+  | "preToolUse"
+  | "postToolUse"
+  | "postToolUseFailure"
+  | "agentStop"
+  | "subagentStart"
+  | "subagentStop"
+  | "errorOccurred"
+  | "preCompact"
+  | "permissionRequest"
+  | "notification";
+
+export const CLAUDE_TO_COPILOT_EVENT_MAP: Record<HookEventName, CopilotHookEventName | null> = {
+  PreToolUse: "preToolUse",
+  PostToolUse: "postToolUse",
+  UserPromptSubmit: null,
+  SessionStart: "sessionStart",
+  SessionEnd: "sessionEnd",
+  Stop: "agentStop",
+  SubagentStop: "subagentStop",
+  Notification: null,
+  PreCompact: null,
+  PostCompact: null,
+};
+
+// Copilot CLI + cloud coding agent tool names. VS Code agent mode uses its own
+// names (createFile/editFiles/runTerminalCommand…) handled by the hook
+// script's copilot branch; renderer matchers carry both via
+// COPILOT_VSCODE_TOOL_ALIASES in client-config-writer.ts.
+export const CLAUDE_TO_COPILOT_TOOL_MAP: Record<string, string> = {
+  Read: "view",
+  Edit: "edit",
+  Write: "create",
+  Bash: "bash",
+  Grep: "grep",
+  Glob: "glob",
+};

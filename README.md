@@ -88,7 +88,8 @@ ships the same local engine inside the editor, still account-free:
 - right-click any file or folder → **Pathrule** → browse the knowledge an AI session there
   would receive, or scope a new memory/rule/skill in two keystrokes;
 - **Connect AI Clients**: GitHub Copilot agent mode registers automatically; Claude Code,
-  Cursor, Codex and Windsurf get managed MCP entries plus context hooks, no JSON editing;
+  Cursor, Codex, Windsurf and the Copilot CLI get managed MCP entries plus context hooks
+  (Copilot reads them from `.github/hooks/`), no JSON editing;
 - works on the same `~/.pathrule` store as the CLI: one identity, one knowledge base.
 
 Also on [Open VSX](https://open-vsx.org/extension/pathrule/pathrule-vscode) for Cursor and Windsurf.

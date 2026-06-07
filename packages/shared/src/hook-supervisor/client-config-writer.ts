@@ -1,6 +1,8 @@
 import {
   CLAUDE_TO_CODEX_EVENT_MAP,
   CLAUDE_TO_CODEX_TOOL_MAP,
+  CLAUDE_TO_COPILOT_EVENT_MAP,
+  CLAUDE_TO_COPILOT_TOOL_MAP,
   CLAUDE_TO_CURSOR_EVENT_MAP,
   CLAUDE_TO_CURSOR_TOOL_MAP,
 } from "./event-mapping.js";
@@ -154,4 +156,85 @@ export function buildCodexHookEvents(config: HookConfig): Record<string, HookMat
 
 export function renderCodexHooks(config: HookConfig): string {
   return `${JSON.stringify({ hooks: buildCodexHookEvents(config) }, null, 2)}\n`;
+}
+
+// ─── GitHub Copilot (docs.github.com/en/copilot/reference/hooks-configuration) ─
+// One `.github/hooks/pathrule.json` feeds all three Copilot surfaces: the CLI
+// reads it natively, VS Code agent mode converts the camelCase event names to
+// PascalCase, and the cloud coding agent reads `.github/hooks/*.json` as its
+// only hook source. Copilot's `matcher` is a regex anchored against the tool
+// name — Claude's `a|b|c` pipe lists are valid alternations as-is.
+
+const COPILOT_TOOL_SET = new Set(["bash", "create", "edit", "view", "grep", "glob"]);
+
+// VS Code agent mode uses its own tool names (docs show both naming
+// generations). Folded into matchers so PreToolUse/PostToolUse still fire if
+// a host applies the matcher against VS Code names rather than CLI names.
+const COPILOT_VSCODE_TOOL_ALIASES: Record<string, readonly string[]> = {
+  view: ["read_file", "readFile"],
+  edit: ["editFiles", "replace_string_in_file"],
+  create: ["createFile", "create_file"],
+  bash: ["runTerminalCommand", "run_in_terminal"],
+};
+
+const COPILOT_SUPPORTED_EVENTS = new Set<HookEventName>([
+  "SessionStart",
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "SubagentStop",
+  "SessionEnd",
+]);
+
+/** One entry per hook in Copilot's flattened per-event array format. The env
+ *  stamp is the hook script's primary client discriminator; the event stamp
+ *  exists because Copilot CLI's camelCase payload carries no event name. */
+interface CopilotHookEntry {
+  type: "command";
+  command: string;
+  matcher?: string;
+  env: Record<string, string>;
+}
+
+function mapMatcherToCopilot(matcher: string | undefined): string | null | undefined {
+  if (!matcher) return undefined; // matcher-less entry — fires on every tool
+  const seen = new Set<string>();
+  const mapped: string[] = [];
+  for (const name of matcher.split("|")) {
+    const copilotName = CLAUDE_TO_COPILOT_TOOL_MAP[name];
+    if (!copilotName || !COPILOT_TOOL_SET.has(copilotName) || seen.has(copilotName)) continue;
+    seen.add(copilotName);
+    mapped.push(copilotName, ...(COPILOT_VSCODE_TOOL_ALIASES[copilotName] ?? []));
+  }
+  return mapped.length > 0 ? mapped.join("|") : null;
+}
+
+export function buildCopilotHookEvents(config: HookConfig): Record<string, CopilotHookEntry[]> {
+  const hooks: Record<string, CopilotHookEntry[]> = {};
+  for (const [rawEvent, rawMatchers] of Object.entries(config.hooks)) {
+    const event = rawEvent as HookEventName;
+    if (!COPILOT_SUPPORTED_EVENTS.has(event)) continue;
+    const copilotEvent = CLAUDE_TO_COPILOT_EVENT_MAP[event];
+    if (!copilotEvent || !rawMatchers || rawMatchers.length === 0) continue;
+    const entries: CopilotHookEntry[] = [];
+    for (const matcherGroup of rawMatchers) {
+      const matcher = mapMatcherToCopilot(matcherGroup.matcher);
+      if (matcher === null) continue; // every tool in the group is unmappable
+      for (const hook of matcherGroup.hooks) {
+        if (hook.type !== "command") continue;
+        entries.push({
+          type: "command",
+          command: hook.command,
+          ...(matcher !== undefined ? { matcher } : {}),
+          env: { PATHRULE_HOOK_CLIENT: "copilot", PATHRULE_HOOK_EVENT: copilotEvent },
+        });
+      }
+    }
+    if (entries.length > 0) hooks[copilotEvent] = entries;
+  }
+  return hooks;
+}
+
+export function renderCopilotHooks(config: HookConfig): string {
+  return `${JSON.stringify({ version: 1, hooks: buildCopilotHookEvents(config) }, null, 2)}\n`;
 }

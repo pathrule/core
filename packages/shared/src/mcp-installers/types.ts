@@ -63,6 +63,12 @@ export interface ManagedMcpEntryInfo {
 export interface ClientInstaller {
   /** Stable id matching AgentTargetId. */
   readonly id: AgentTargetId;
+  /**
+   * Human label disambiguating this config when a client registers more than
+   * one installer (copilot: "Copilot CLI" vs "VS Code user config"). Leave
+   * unset for single-config clients — display surfaces fall back to the id.
+   */
+  readonly configLabel?: string;
   /** Absolute config path on the user's machine. */
   homeConfigPath(homedir: string, platform: NodeJS.Platform): string;
   /**

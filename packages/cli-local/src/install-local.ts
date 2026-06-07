@@ -7,7 +7,7 @@
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { getInstaller } from "@pathrule/shared/mcp-installers/registry.js";
+import { getInstallers } from "@pathrule/shared/mcp-installers/registry.js";
 import type { AgentTargetId } from "@pathrule/shared/skills/agent-targets.js";
 import type { McpServerEntry } from "@pathrule/shared/mcp-types.js";
 import { atomicWrite, readIfExists } from "@pathrule/shared/local-runtime/atomic-write.js";
@@ -36,9 +36,11 @@ const TARGET_ALIASES: Record<string, CliInstallTarget> = {
   cursor: "cursor",
   codex: "codex",
   windsurf: "windsurf",
+  copilot: "copilot",
+  "github-copilot": "copilot",
 };
 
-const ALL_TARGETS: AgentTargetId[] = ["claude-code", "cursor", "codex", "windsurf"];
+const ALL_TARGETS: AgentTargetId[] = ["claude-code", "cursor", "codex", "windsurf", "copilot"];
 
 export function parseInstallTargets(raw: string | undefined): AgentTargetId[] {
   const target = TARGET_ALIASES[(raw ?? "all").toLowerCase()];
@@ -68,32 +70,36 @@ export async function installEntryToCliTargets(
   env: NodeJS.ProcessEnv,
 ): Promise<CliInstallResult[]> {
   const platform = cliPlatform(env);
-  return Promise.all(
-    targets.map(async (target) => {
-      const installer = getInstaller(target);
-      const configPath = installer.homeConfigPath(homedir(), platform);
-      try {
-        const existing = await readIfExists(configPath);
-        const result = installer.inject(existing, entry);
-        await atomicWrite(configPath, result.body);
-        return {
-          client: target,
-          ok: true,
-          status: "installed" as const,
-          config_path: configPath,
-          was_new: result.wasNew,
-        };
-      } catch (err) {
-        return {
-          client: target,
-          ok: false,
-          status: "error" as const,
-          config_path: configPath,
-          error: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }),
+  // One result per (target, config file) — multi-config clients (copilot:
+  // CLI config + VS Code user mcp.json) report each config separately.
+  const results = await Promise.all(
+    targets.flatMap((target) =>
+      getInstallers(target).map(async (installer): Promise<CliInstallResult> => {
+        const configPath = installer.homeConfigPath(homedir(), platform);
+        try {
+          const existing = await readIfExists(configPath);
+          const result = installer.inject(existing, entry);
+          await atomicWrite(configPath, result.body);
+          return {
+            client: target,
+            ok: true,
+            status: "installed" as const,
+            config_path: configPath,
+            was_new: result.wasNew,
+          };
+        } catch (err) {
+          return {
+            client: target,
+            ok: false,
+            status: "error" as const,
+            config_path: configPath,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }),
+    ),
   );
+  return results;
 }
 
 /**

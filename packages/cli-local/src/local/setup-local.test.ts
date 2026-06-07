@@ -17,13 +17,12 @@ vi.mock("@pathrule/shared/mcp-installers/registry.js", async (importOriginal) =>
     await importOriginal<typeof import("@pathrule/shared/mcp-installers/registry.js")>();
   return {
     ...actual,
-    getInstaller: (id: never) => {
-      const real = actual.getInstaller(id);
-      return {
+    getInstallers: (id: never) =>
+      actual.getInstallers(id).map((real, index) => ({
         ...real,
-        homeConfigPath: () => join(mocks.configDir.value, `${String(id)}.json`),
-      };
-    },
+        homeConfigPath: () =>
+          join(mocks.configDir.value, `${String(id)}${index > 0 ? `-${index}` : ""}.json`),
+      })),
   };
 });
 
