@@ -7,7 +7,7 @@ import { LocalBackend } from "@pathrule/core";
 import { initLocalWorkspace } from "./init-local.js";
 import { listLocalContent, searchLocalContent, readLocalContent } from "./content-local.js";
 
-describe("local content browsing (M52 5.1)", () => {
+describe("local content browsing", () => {
   const tmps: string[] = [];
   afterEach(() => {
     for (const d of tmps) rmSync(d, { recursive: true, force: true });

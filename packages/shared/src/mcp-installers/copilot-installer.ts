@@ -7,7 +7,7 @@
 // settings on github.com (no file or API to manage) — doctor surfaces it as
 // a documented manual step instead.
 //
-// Schemas verified in docs/superpowers/specs/m55-copilot-capability-spike.md.
+// Schemas verified against the GitHub Copilot hooks capability spec.
 
 import {
   defaultManagedEntryInfo,

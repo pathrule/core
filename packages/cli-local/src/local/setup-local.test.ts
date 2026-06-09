@@ -50,7 +50,7 @@ describe("parseLocalSetupArgs", () => {
   });
 });
 
-describe("runLocalSetup (M52 5.x e2e)", () => {
+describe("runLocalSetup (e2e)", () => {
   const tmps: string[] = [];
   afterEach(() => {
     for (const d of tmps) rmSync(d, { recursive: true, force: true });

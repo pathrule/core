@@ -1,4 +1,4 @@
-# Pathrule Core — OSS CI (M52 5.5).
+# Pathrule Core — OSS CI.
 # Runs on the public mirror: typecheck + the KnowledgeBackend contract suite
 # (in-memory + SQLite parity) + the local CLI module tests, on Linux and macOS.
 name: CI

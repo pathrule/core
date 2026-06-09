@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { LocalBackend } from "@pathrule/core";
 import { initLocalWorkspace } from "./init-local.js";
 
-describe("initLocalWorkspace (M52 5.1)", () => {
+describe("initLocalWorkspace", () => {
   const tmps: string[] = [];
   afterEach(() => {
     for (const d of tmps) rmSync(d, { recursive: true, force: true });

@@ -12,7 +12,7 @@ import { syncLocalWorkspace } from "./sync-local.js";
 
 const HOOK_SCRIPT_SOURCE = "#!/usr/bin/env node\n// pathrule-hook test body\n";
 
-describe("syncLocalWorkspace (M52 5.x)", () => {
+describe("syncLocalWorkspace", () => {
   const tmps: string[] = [];
   afterEach(() => {
     for (const d of tmps) rmSync(d, { recursive: true, force: true });

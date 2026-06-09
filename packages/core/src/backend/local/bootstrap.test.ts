@@ -9,7 +9,7 @@ import { SCHEMA_VERSION } from "./schema.js";
 import { resolveLocalPrincipal } from "./identity.js";
 
 // The canonical-store bootstrap + numbered-migration runner.
-describe("LocalBackend bootstrap (Phase 2.2)", () => {
+describe("LocalBackend bootstrap", () => {
   const tmps: string[] = [];
   afterEach(() => {
     for (const d of tmps) rmSync(d, { recursive: true, force: true });
@@ -61,7 +61,7 @@ describe("LocalBackend bootstrap (Phase 2.2)", () => {
     b2.close();
   });
 
-  it("stamps the local principal on created_by/last_edited_by (Phase 4.5 identity)", async () => {
+  it("stamps the local principal on created_by/last_edited_by identity", async () => {
     const b = new LocalBackend(":memory:", { principal: "alice" });
     const node = await b.ensureNodeForPath("ws", "/x");
     const mem = await b.writeMemory({
