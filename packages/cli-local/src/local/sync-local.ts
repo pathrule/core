@@ -6,21 +6,24 @@
 //      also registers the hook command path the settings merger writes),
 //   2. install the Pre/Post/UserPromptSubmit hook into <cwd>/.claude/settings.json
 //      via the pure settings merger,
-//   3. write the static `.claude/rules/pathrule-protocol.md` (no backend needed;
-//      the dynamic CLAUDE.md render is deliberately skipped — the hook-index
-//      already injects path context),
-//   4. warm `~/.pathrule/cache/<ws>/hook-index.json` from the LocalBackend.
+//   3. write the static `.claude/rules/pathrule-protocol.md` (no backend needed),
+//   4. render the per-directory compiled knowledge files (claude-code's
+//      CLAUDE.md + .claude/rules/pathrule-knowledge.md, plus the other enabled
+//      clients' files) from the LocalBackend — brings the native
+//      compilation win to the no-login edition (MCP-less, turn-zero path context),
+//   5. warm `~/.pathrule/cache/<ws>/hook-index.json` from the LocalBackend.
 //
 // No org, no auth, no remote calls, no preflight. Idempotent — every step is
 // write-if-changed or a fresh assembly.
 
 import { join } from "node:path";
 
-import { LocalBackend } from "@pathrule/core";
+import { LocalBackend, resolveLocalPrincipal } from "@pathrule/core";
 import {
   ensureClaudeSettingsHook,
   renderProtocolRulesFile,
 } from "@pathrule/shared/pathrule-protocol.js";
+import { rerenderMultiClientLocal } from "@pathrule/shared/client-renderers/pipeline.js";
 import { atomicWrite, readIfExists } from "@pathrule/shared/local-runtime/atomic-write.js";
 import {
   syncHookIndex,
@@ -45,6 +48,15 @@ export interface LocalSyncResult {
     written: number;
     skipped: number;
     errors: Array<{ path: string; message: string }>;
+  };
+  companion: {
+    ok: boolean;
+    enabled: string[];
+    written: number;
+    skipped: number;
+    removed: number;
+    errors: Array<{ path: string; message: string }>;
+    error?: string;
   };
   hook_index: HookIndexSyncResult;
   error?: string;
@@ -138,9 +150,42 @@ export async function syncLocalWorkspace(
     });
   }
 
-  // 4. Warm the offline hook-index from the local store.
+  // 4 + 5 share one LocalBackend handle: render the per-directory compiled
+  // knowledge files, then warm the offline hook-index from the same store.
+  let companion: LocalSyncResult["companion"];
   let hookIndex: HookIndexSyncResult;
   const backend = LocalBackend.openForWorkspace(workspaceId, env);
+  try {
+    const outcome = await rerenderMultiClientLocal({
+      backend,
+      workspaceId,
+      workspaceName: backend.getWorkspaceName(workspaceId) ?? workspaceId,
+      workspaceRoot: cwd,
+      userId: resolveLocalPrincipal(env),
+      runtimeOwner: CLI_MANAGED_FILE_OWNER,
+      runtimeVersion: CLI_VERSION,
+    });
+    companion = {
+      ok: outcome.ok,
+      enabled: outcome.enabled,
+      written: outcome.disk.written,
+      skipped: outcome.disk.skipped,
+      removed: outcome.disk.removed,
+      errors: outcome.disk.errors,
+      error: outcome.error,
+    };
+  } catch (err) {
+    companion = {
+      ok: false,
+      enabled: [],
+      written: 0,
+      skipped: 0,
+      removed: 0,
+      errors: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
   try {
     hookIndex = await syncHookIndex({
       backend,
@@ -160,13 +205,15 @@ export async function syncLocalWorkspace(
     backend.close();
   }
 
-  const ok = hookScript.ok && files.errors.length === 0 && hookIndex.ok;
+  const ok =
+    hookScript.ok && files.errors.length === 0 && companion.ok && hookIndex.ok;
   return {
     ok,
     workspace_id: workspaceId,
     workspace_root: cwd,
     hook_script: hookScript,
     files,
+    companion,
     hook_index: hookIndex,
     error: ok
       ? undefined
@@ -174,6 +221,8 @@ export async function syncLocalWorkspace(
         ? "hook_script_install_failed"
         : files.errors.length > 0
           ? "local_file_sync_failed"
-          : "hook_index_sync_failed",
+          : !companion.ok
+            ? "companion_render_failed"
+            : "hook_index_sync_failed",
   };
 }

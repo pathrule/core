@@ -17,6 +17,8 @@
  */
 import type { Memory, Rule, Skill } from "@pathrule/shared/content-types.js";
 import type { HookIndex } from "@pathrule/shared/hook-supervisor/types.js";
+import type { EmbeddingsPayload, Warehouse } from "./inputs.js";
+import type { CompiledKnowledgeNode, KnowledgeRenderMode } from "./knowledge-compiler.js";
 import type {
   ProjectMapSearchResult,
   HotPath,
@@ -259,6 +261,38 @@ export interface KnowledgeBackend {
    * CLI writer to fill. Null only when unavailable.
    */
   buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null>;
+
+  /**
+   * The full-body warehouse: every memory/rule/skill keyed by id, used for
+   * delta delivery so the hook injects full bodies without an MCP round-trip.
+   * Optional — backends that haven't adopted the warehouse simply omit it (the
+   * writer then skips warehouse persistence). Built from the same source as the
+   * hook index,
+   * so `content_hash` values agree.
+   */
+  buildWarehousePayload?(workspaceId: string): Promise<Warehouse | null>;
+
+  /**
+   * Precomputed embedding vectors keyed by item id, persisted as
+   * `embeddings.json` next to the warehouse so the hook can rank a routed path's
+   * items against the prompt embedding offline. Optional — returns `null` when
+   * no embedding key/store is wired (the hook then falls back to lexical
+   * selection). The local edition projects its on-write embedding store with no
+   * network; cloud/other backends may omit it.
+   */
+  buildEmbeddingsPayload?(workspaceId: string): Promise<EmbeddingsPayload | null>;
+
+  /**
+   * Native Knowledge Compilation: per-directory markdown
+   * knowledge sections, compiled from the same source as the hook index, for
+   * the client renderers to wrap in each agent's native instruction format
+   * (directory CLAUDE.md, nested AGENTS.md, Cursor globs, Copilot applyTo).
+   * Optional — when absent, companions stay protocol-only (legacy behavior).
+   */
+  buildKnowledgePayload?(
+    workspaceId: string,
+    mode?: KnowledgeRenderMode,
+  ): Promise<CompiledKnowledgeNode[] | null>;
 
   // ── activity ───────────────────────────────────────────────────────────
   /**

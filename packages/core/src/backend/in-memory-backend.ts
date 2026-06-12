@@ -51,7 +51,13 @@ import { rankProjectMap, type ProjectMapCandidate } from "./project-map-rank.js"
 import { activityTouchedPaths, rankCoupledPaths } from "./co-change-rank.js";
 import { searchEpisodes, clusterEpisodes, type EpisodeActivity } from "./work-episodes.js";
 import { assembleBriefingLocal } from "./briefing.js";
-import { assembleHookIndex, type HookRuleInput } from "./hook-index.js";
+import { assembleHookIndex, assembleWarehouse, type HookIndexInput, type HookRuleInput } from "./hook-index.js";
+import {
+  assembleKnowledgeNodes,
+  type CompiledKnowledgeNode,
+  type KnowledgeRenderMode,
+} from "./knowledge-compiler.js";
+import type { EmbeddingsPayload, Warehouse } from "./inputs.js";
 import { embedTextBYO, hasEmbeddingKey, type EmbedFn } from "./embedding-adapter.js";
 import {
   cosineSimilarity,
@@ -1108,8 +1114,8 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     return Promise.resolve(rows.slice(0, limit));
   }
 
-  // Assemble the offline HookIndex from the in-memory store.
-  buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null> {
+  // Collect the shared source input for both the hook index and the warehouse.
+  private collectHookInput(workspaceId: string): HookIndexInput {
     const memories = [...this.memories.values()]
       .filter((m) => m.workspaceId === workspaceId && !this.archivedMemories.has(m.id))
       .map((m) => {
@@ -1142,15 +1148,20 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
 
     const skills = [...this.skills.values()]
       .filter((s) => s.workspaceId === workspaceId && !this.archivedSkills.has(s.id))
-      .map((s) => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        content: s.content,
-        source: s.source,
-        github_url: s.githubUrl,
-        semantic_tags: null,
-      }));
+      .map((s) => {
+        const nodeId = this.skillNodes.get(s.id);
+        const node = nodeId ? this.nodes.get(nodeId) : undefined;
+        return {
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          content: s.content,
+          source: s.source,
+          github_url: s.githubUrl,
+          node_paths: node ? [node.relativePath] : [],
+          semantic_tags: null,
+        };
+      });
 
     const since = Date.parse(this.now()) - 30 * 60 * 1000;
     const recentActivitySubjects = [...this.episodeActivities].slice(-100).map((a) => a.subjects);
@@ -1175,20 +1186,62 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
       else if (e.status === "in_progress") inProgressRefreshCount += 1;
     }
 
-    return Promise.resolve(
-      assembleHookIndex({
-        workspaceId,
-        generatedAt: this.now(),
-        memories,
-        rules,
-        skills,
-        recentActivitySubjects,
-        recentActivityDigest,
-        workEpisodes,
-        pendingRefreshCount,
-        inProgressRefreshCount,
-      }),
-    );
+    return {
+      workspaceId,
+      generatedAt: this.now(),
+      memories,
+      rules,
+      skills,
+      recentActivitySubjects,
+      recentActivityDigest,
+      workEpisodes,
+      pendingRefreshCount,
+      inProgressRefreshCount,
+    };
+  }
+
+  // Assemble the offline HookIndex from the in-memory store.
+  buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null> {
+    return Promise.resolve(assembleHookIndex(this.collectHookInput(workspaceId)));
+  }
+
+  // Assemble the full-body warehouse from the in-memory store.
+  buildWarehousePayload(workspaceId: string): Promise<Warehouse | null> {
+    return Promise.resolve(assembleWarehouse(this.collectHookInput(workspaceId)));
+  }
+
+  // Project the reference embedding store into a memory-id→vector payload
+  // (parity with LocalBackend). Active memories of this workspace only.
+  async buildEmbeddingsPayload(workspaceId: string): Promise<EmbeddingsPayload | null> {
+    const payload: EmbeddingsPayload = {};
+    for (const [id, emb] of this.embeddings) {
+      const mem = this.memories.get(id);
+      if (!mem || mem.workspaceId !== workspaceId || this.archivedMemories.has(id)) continue;
+      payload[id] = [...emb.vector];
+    }
+    // Skills embedded on demand (few per workspace; parity with LocalBackend).
+    if (this.semanticEnabled) {
+      for (const s of this.skills.values()) {
+        if (s.workspaceId !== workspaceId || this.archivedSkills.has(s.id)) continue;
+        try {
+          const r = await this.embed(composeEmbeddingText(s.name, s.content), {
+            inputType: "document",
+          });
+          if (r && r.embedding.length > 0) payload[s.id] = r.embedding;
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    return Object.keys(payload).length > 0 ? payload : null;
+  }
+
+  // Native Knowledge Compilation: per-directory knowledge sections (same source).
+  buildKnowledgePayload(
+    workspaceId: string,
+    mode?: KnowledgeRenderMode,
+  ): Promise<CompiledKnowledgeNode[] | null> {
+    return Promise.resolve(assembleKnowledgeNodes(this.collectHookInput(workspaceId), { mode }));
   }
 
   // ── activity ───────────────────────────────────────────────────────────────────

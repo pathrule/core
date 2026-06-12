@@ -87,6 +87,57 @@ export function composeEmbeddingText(title: string, content: string): string {
   return `Title: ${title}\nSummary: ${summary}`;
 }
 
+// Relevance-routed body injection. The hook ranks a path's memory/skill
+// candidates against the prompt embedding and injects only the top-k full
+// bodies. Default 8 for completeness: a multi-part prompt needs several
+// relevant bodies at once, and the cosine floor below already filters noise, so
+// a too-small top-k leaves the agent exploring for the missing facts (the
+// dominant end-to-end cost). The floor, not k, is what abstains on a weak match.
+export const SEMANTIC_INJECT_TOPK = 8;
+// Query↔document cosine for RELEVANT pairs sits ~0.50–0.65 (measured on Voyage
+// voyage-3 query/document embeddings), so the floor matches the established
+// SEMANTIC_QUERY_MIN_SIMILARITY (0.45): relevant items pass, noise is dropped. A
+// higher floor (e.g. 0.62) silently cuts true matches and forces a lexical
+// fallback — i.e. the semantic ranker never actually fires.
+export const SEMANTIC_INJECT_MIN = 0.45;
+
+/** One ranked item: an id and its cosine score against the prompt. */
+export interface RankedItem {
+  id: string;
+  score: number;
+}
+
+/**
+ * Rank candidate items by cosine similarity to the prompt vector and return the
+ * top-k above `minCosine`. PURE: no I/O, deterministic. Ordering is
+ * score-descending with a stable tie-break by id, so an unchanged candidate set
+ * + prompt vector always yields byte-identical selection (the cache-stability
+ * invariant the hook relies on). Items missing an id or vector are skipped; a
+ * mismatched/zero vector scores 0 (via `cosineSimilarity`) and is dropped by the
+ * threshold.
+ */
+export function rankByPromptSimilarity(input: {
+  promptVec: ArrayLike<number>;
+  items: Array<{ id: string; vec: ArrayLike<number> }>;
+  topK?: number;
+  minCosine?: number;
+}): RankedItem[] {
+  const topK = input.topK ?? SEMANTIC_INJECT_TOPK;
+  const minCosine = input.minCosine ?? SEMANTIC_INJECT_MIN;
+  const scored: RankedItem[] = [];
+  for (const item of input.items ?? []) {
+    if (!item || typeof item.id !== "string" || !item.vec) continue;
+    const score = cosineSimilarity(input.promptVec, item.vec);
+    if (score < minCosine) continue;
+    scored.push({ id: item.id, score });
+  }
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  return scored.slice(0, Math.max(0, topK));
+}
+
 /**
  * Shape scored candidates into the additive `semantic_candidates` payload:
  * similarity-descending, drop direct (already-shown) ids, mark lexical overlap

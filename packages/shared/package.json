@@ -6,7 +6,13 @@
   "type": "module",
   "exports": {
     "./skills/agent-targets.js": "./src/skills/agent-targets.ts",
+    "./skills/disk-detection.js": "./src/skills/disk-detection.ts",
     "./mcp-installers/registry.js": "./src/mcp-installers/registry.ts",
+    "./client-renderers/registry.js": "./src/client-renderers/registry.ts",
+    "./client-renderers/orchestrator.js": "./src/client-renderers/orchestrator.ts",
+    "./client-renderers/disk-writer.js": "./src/client-renderers/disk-writer.ts",
+    "./client-renderers/pipeline.js": "./src/client-renderers/pipeline.ts",
+    "./client-renderers/safe-write.js": "./src/client-renderers/safe-write.ts",
     "./local-runtime/paths.js": "./src/local-runtime/paths.ts",
     "./local-runtime/hook-index-writer.js": "./src/local-runtime/hook-index-writer.ts",
     "./local-runtime/managed-file-ownership.js": "./src/local-runtime/managed-file-ownership.ts",

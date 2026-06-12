@@ -93,7 +93,13 @@ import { rankProjectMap, type ProjectMapCandidate } from "../project-map-rank.js
 import { activityTouchedPaths, rankCoupledPaths } from "../co-change-rank.js";
 import { searchEpisodes, clusterEpisodes, type EpisodeActivity } from "../work-episodes.js";
 import { assembleBriefingLocal } from "../briefing.js";
-import { assembleHookIndex, type HookRuleInput } from "../hook-index.js";
+import { assembleHookIndex, assembleWarehouse, type HookIndexInput, type HookRuleInput } from "../hook-index.js";
+import {
+  assembleKnowledgeNodes,
+  type CompiledKnowledgeNode,
+  type KnowledgeRenderMode,
+} from "../knowledge-compiler.js";
+import type { EmbeddingsPayload, Warehouse } from "../inputs.js";
 import { resolveLocalPrincipal } from "./identity.js";
 import { embedTextBYO, hasEmbeddingKey, type EmbedFn } from "../embedding-adapter.js";
 import {
@@ -379,6 +385,19 @@ export class LocalBackend implements KnowledgeBackend {
         canonicalizePath(input.localRootPath),
         this.now(),
       );
+  }
+
+  /**
+   * Display name registered for a local workspace, used to title the rendered
+   * companion files. Local-only convenience getter — not on the cross-edition
+   * interface (the hosted edition reads `workspaces.name` over Supabase).
+   * Falls back to `null` when the workspace is unknown.
+   */
+  getWorkspaceName(workspaceId: string): string | null {
+    const row = this.db
+      .prepare("SELECT name FROM workspaces WHERE id = ? LIMIT 1")
+      .get(workspaceId) as { name: string | null } | undefined;
+    return row?.name ?? null;
   }
 
   resolveWorkspaceFromCwd(cwd: string): Promise<WorkspaceMatch | null> {
@@ -1608,7 +1627,7 @@ export class LocalBackend implements KnowledgeBackend {
   // Assemble the full offline HookIndex from the local store. Curation-only
   // fields (block_pattern/symbols/fail_patterns/promoted_rules_signature/experiments) are
   // omitted; semantic_tags are inferred (no local column). workspace_root left empty for the CLI.
-  buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null> {
+  private collectHookInput(workspaceId: string): HookIndexInput {
     const memories = (
       this.db
         .prepare(
@@ -1654,6 +1673,19 @@ export class LocalBackend implements KnowledgeBackend {
       semantic_tags: null,
     }));
 
+    const skillNodePaths = this.db
+      .prepare(
+        `SELECT ns.skill_id AS skill_id, n.relative_path AS node_path
+         FROM node_skills ns JOIN nodes n ON n.id = ns.node_id
+         WHERE n.workspace_id = ?`,
+      )
+      .all(workspaceId) as Array<{ skill_id: string; node_path: string }>;
+    const pathsBySkill = new Map<string, string[]>();
+    for (const r of skillNodePaths) {
+      const arr = pathsBySkill.get(r.skill_id) ?? [];
+      arr.push(r.node_path);
+      pathsBySkill.set(r.skill_id, arr);
+    }
     const skills = (
       this.db
         .prepare(
@@ -1667,7 +1699,7 @@ export class LocalBackend implements KnowledgeBackend {
         source: string;
         github_url: string | null;
       }>
-    ).map((s) => ({ ...s, semantic_tags: null }));
+    ).map((s) => ({ ...s, node_paths: pathsBySkill.get(s.id) ?? [], semantic_tags: null }));
 
     const recentActs = this.db
       .prepare(
@@ -1706,20 +1738,74 @@ export class LocalBackend implements KnowledgeBackend {
     const pendingRefreshCount = counts.find((c) => c.status === "pending")?.c ?? 0;
     const inProgressRefreshCount = counts.find((c) => c.status === "in_progress")?.c ?? 0;
 
-    return Promise.resolve(
-      assembleHookIndex({
-        workspaceId,
-        generatedAt: this.now(),
-        memories,
-        rules,
-        skills,
-        recentActivitySubjects,
-        recentActivityDigest,
-        workEpisodes,
-        pendingRefreshCount,
-        inProgressRefreshCount,
-      }),
-    );
+    return {
+      workspaceId,
+      generatedAt: this.now(),
+      memories,
+      rules,
+      skills,
+      recentActivitySubjects,
+      recentActivityDigest,
+      workEpisodes,
+      pendingRefreshCount,
+      inProgressRefreshCount,
+    };
+  }
+
+  buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null> {
+    return Promise.resolve(assembleHookIndex(this.collectHookInput(workspaceId)));
+  }
+
+  // The full-body warehouse, assembled from the same SQLite source.
+  buildWarehousePayload(workspaceId: string): Promise<Warehouse | null> {
+    return Promise.resolve(assembleWarehouse(this.collectHookInput(workspaceId)));
+  }
+
+  // Project the on-write embedding store into a memory-id→vector payload.
+  // Pure projection: no network (memories are embedded at write time, so this is
+  // delta-correct by construction). null when no active embeddings exist.
+  async buildEmbeddingsPayload(workspaceId: string): Promise<EmbeddingsPayload | null> {
+    const rows = this.db
+      .prepare(
+        `SELECT e.memory_id AS id, e.dims AS dims, e.embedding AS embedding
+           FROM memory_embeddings e
+           JOIN memories m ON m.id = e.memory_id AND m.status = 'active'
+          WHERE e.workspace_id = ?`,
+      )
+      .all(workspaceId) as Array<{ id: string; dims: number; embedding: Buffer }>;
+    const payload: EmbeddingsPayload = {};
+    for (const row of rows) {
+      const vec = blobToVector(row.embedding, row.dims);
+      if (!vec) continue; // truncated/corrupt blob — skip rather than ship garbage
+      payload[row.id] = Array.from(vec);
+    }
+    // Skills are few per workspace, so they are embedded on demand here
+    // (no dedicated skill_embeddings table). Best-effort: a failed embed just
+    // drops that skill from the ranking pool, never fails the payload.
+    if (this.semanticEnabled) {
+      const skillRows = this.db
+        .prepare(`SELECT id, name, content FROM skills WHERE workspace_id = ? AND status = 'active'`)
+        .all(workspaceId) as Array<{ id: string; name: string; content: string }>;
+      for (const s of skillRows) {
+        try {
+          const r = await this.embed(composeEmbeddingText(s.name, s.content), {
+            inputType: "document",
+          });
+          if (r && r.embedding.length > 0) payload[s.id] = r.embedding;
+        } catch {
+          /* best-effort: skip this skill */
+        }
+      }
+    }
+    return Object.keys(payload).length > 0 ? payload : null;
+  }
+
+  // Native Knowledge Compilation: per-directory knowledge sections (same source).
+  buildKnowledgePayload(
+    workspaceId: string,
+    mode?: KnowledgeRenderMode,
+  ): Promise<CompiledKnowledgeNode[] | null> {
+    return Promise.resolve(assembleKnowledgeNodes(this.collectHookInput(workspaceId), { mode }));
   }
 
   // Compose the deep briefing from engine outputs + local prior_solutions.

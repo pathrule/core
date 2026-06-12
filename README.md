@@ -136,10 +136,12 @@ call that provider):
 | Env var | Enables | Without it |
 | --- | --- | --- |
 | `PATHRULE_AI_ROUTE_KEY` (Anthropic) | LLM intent routing for sharper context-depth selection | deterministic router (default, instant) |
-| `PATHRULE_EMBEDDING_PROVIDER` = `voyage` \| `openai` + `PATHRULE_EMBEDDING_API_KEY` | Semantic memory search: embeddings computed on write, cosine-ranked at query time, stored locally | lexical + path-scoped retrieval |
+| `PATHRULE_EMBEDDING_PROVIDER` = `voyage` \| `openai` + `PATHRULE_EMBEDDING_API_KEY` | Semantic relevance, two places: (1) `get_context` memory search, and (2) the hooks — each prompt is embedded and the most relevant memory/skill bodies are ranked and injected just-in-time. Embeddings are computed on write and stored locally; only the prompt is embedded at runtime. | lexical + path-scoped retrieval (hooks still inject, ranked by keyword overlap instead of meaning) |
 
 Both degrade gracefully. On timeout or a missing key, Pathrule falls back to the deterministic
-path, the same fallback discipline the cloud edition uses.
+path, the same fallback discipline the cloud edition uses. The embedding key is what turns the
+hooks from "inject the path's titles" into "inject the few bodies this prompt actually needs," so
+it is the highest-leverage key for context quality and token cost.
 
 ## 🏷 Editions
 

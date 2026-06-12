@@ -7,6 +7,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LocalBackend } from "@pathrule/core";
 import { initLocalWorkspace } from "./init-local.js";
 import { syncLocalWorkspace } from "./sync-local.js";
 
@@ -72,6 +73,54 @@ describe("syncLocalWorkspace", () => {
 
     // Managed-file ownership recorded for repair/uninstall.
     expect(existsSync(join(cwd, ".pathrule/managed-files.json"))).toBe(true);
+  });
+
+  it("renders the per-directory compiled knowledge files from the local store — no login", async () => {
+    const home = freshDir("pathrule-cli-home-");
+    const cwd = freshDir("pathrule-cli-ws-");
+    const env = { PATHRULE_HOME: home } as NodeJS.ProcessEnv;
+
+    const ws = await initLocalWorkspace({ cwd, env, genWorkspaceId: () => "ws-knowledge" });
+
+    // Seed knowledge: a root-scoped memory + a path-scoped one under /src.
+    const backend = LocalBackend.openForWorkspace(ws.workspaceId, env);
+    try {
+      const root = await backend.ensureNodeForPath(ws.workspaceId, "/");
+      await backend.writeMemory({
+        workspaceId: ws.workspaceId,
+        nodeId: root.id,
+        title: "Root convention",
+        content: "Always run pnpm typecheck before committing.",
+      });
+      const src = await backend.ensureNodeForPath(ws.workspaceId, "/src");
+      await backend.writeMemory({
+        workspaceId: ws.workspaceId,
+        nodeId: src.id,
+        title: "Src module rule",
+        content: "Components live under src and export via index.ts.",
+      });
+    } finally {
+      backend.close();
+    }
+
+    const result = await syncLocalWorkspace(env, cwd, ws.workspaceId, {
+      hookScriptSource: HOOK_SCRIPT_SOURCE,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.companion.ok).toBe(true);
+    expect(result.companion.written).toBeGreaterThan(0);
+
+    // Root-scoped knowledge → .claude/rules/pathrule-knowledge.md.
+    const rootKnowledge = readFileSync(
+      join(cwd, ".claude/rules/pathrule-knowledge.md"),
+      "utf8",
+    );
+    expect(rootKnowledge).toContain("Root convention");
+
+    // Path-scoped knowledge → src/CLAUDE.md (Claude Code's native lazy-load channel).
+    const srcClaudeMd = readFileSync(join(cwd, "src/CLAUDE.md"), "utf8");
+    expect(srcClaudeMd).toContain("Src module rule");
   });
 
   it("is idempotent — a second run rewrites nothing", async () => {

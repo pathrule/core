@@ -18,10 +18,13 @@ import type {
   MemoryStub,
   RuleStub,
   SkillInvocationStub,
+  SkillStub,
   WorkEpisodeStub,
 } from "@pathrule/shared/hook-supervisor/types.js";
 import type { WorkEpisodeBrief } from "@pathrule/shared/intelligence/types.js";
 import { semanticTagsOrInfer } from "@pathrule/shared/semantic-tags.js";
+import { createHash } from "node:crypto";
+import type { Warehouse } from "./inputs.js";
 
 const PREVIEW_CHARS = 120;
 const PER_BODY_BYTE_CAP = 3 * 1024;
@@ -63,6 +66,10 @@ export interface HookSkillInput {
   content: string;
   source: string;
   github_url: string | null;
+  /** Node paths this skill is attached to (via node_skills). Used by the
+   *  knowledge compiler to place the skill in its directory's native file;
+   *  empty/absent → compiled at the workspace root. */
+  node_paths?: string[];
   semantic_tags?: string[] | null;
 }
 export interface HookActivityDigestRow {
@@ -91,6 +98,16 @@ function truncatePreview(text: string, n: number): string {
   return text.replace(/\s+/g, " ").trim().slice(0, n);
 }
 
+/**
+ * Change-detection key for delta injection: a stable sha256(content) prefix.
+ * The delta gate re-injects a memory/rule/skill only when this differs from the
+ * last-injected hash in the session ledger, so an unchanged item never re-enters
+ * the agent context (cache-stability invariant).
+ */
+function contentHash(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
 function normalizeSource(source: string): SkillInvocationStub["source"] {
   return source === "manual" || source === "template" || source === "github_ref"
     ? source
@@ -111,6 +128,27 @@ function buildSessionDigest(
   if (pending > 0) parts.push(`${pending} pending refresh${pending === 1 ? "" : "es"}`);
   if (inProgress > 0) parts.push(`${inProgress} in progress`);
   return parts.length > 0 ? parts.join("; ") : null;
+}
+
+/**
+ * Build the full-body warehouse: every memory/rule/skill keyed by id, no preview
+ * truncation. This is the "data availability" layer — it does not enter the agent
+ * context; delivery reads from it by id only for delta items. `content_hash` is
+ * computed with the SAME function the index uses, so an item's warehouse hash and
+ * index hash always agree — the delta gate relies on this.
+ */
+export function assembleWarehouse(input: HookIndexInput): Warehouse {
+  const warehouse: Warehouse = {};
+  for (const m of input.memories) {
+    warehouse[m.id] = { type: "memory", title: m.title, body: m.content, content_hash: contentHash(m.content) };
+  }
+  for (const r of input.rules) {
+    warehouse[r.id] = { type: "rule", title: r.name, body: r.content, content_hash: contentHash(r.content) };
+  }
+  for (const s of input.skills) {
+    warehouse[s.id] = { type: "skill", title: s.name, body: s.content, content_hash: contentHash(s.content) };
+  }
+  return warehouse;
 }
 
 /** Assemble the full HookIndex (workspace_root left null — the CLI writer fills it). */
@@ -143,6 +181,7 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
       title: m.title,
       preview: truncatePreview(m.content, PREVIEW_CHARS),
       node_path: m.node_path,
+      content_hash: contentHash(m.content),
       semantic_tags: semanticTagsOrInfer(m.semantic_tags, {
         text: `${m.title} ${m.content.slice(0, 1000)}`,
         path: m.node_path,
@@ -165,6 +204,7 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
       scope_type: r.scope_type as RuleStub["scope_type"],
       priority: r.priority as RuleStub["priority"],
       preview: truncatePreview(r.content, PREVIEW_CHARS),
+      content_hash: contentHash(r.content),
       semantic_tags: semanticTagsOrInfer(r.semantic_tags, {
         text: `${r.name} ${r.content.slice(0, 1000)}`,
         path: null,
@@ -203,6 +243,7 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
       github_url: s.github_url,
       node_path: null,
       preview: truncatePreview(s.content, PREVIEW_CHARS),
+      content_hash: contentHash(s.content),
       semantic_tags: semanticTagsOrInfer(s.semantic_tags, {
         text: `${s.name} ${s.description ?? ""} ${s.content.slice(0, 1000)}`,
         path: null,
@@ -210,6 +251,23 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
     };
     if (s.content.length >= 1 && byteLength(s.content) <= SKILL_BODY_CAP) stub.body = s.content;
     (skillIndex[key] ??= []).push(stub);
+  }
+
+  // ── skills → path_skills (path-scoped stubs for relevance top-k) ──
+  // Mirrors path_memories so the hook can find a routed path's skills and rank
+  // them against the prompt; bodies live in the warehouse, vectors in embeddings.json.
+  const pathSkills: Record<string, SkillStub[]> = {};
+  for (const s of input.skills) {
+    const targets = s.node_paths && s.node_paths.length > 0 ? s.node_paths : ["/"];
+    for (const np of targets) {
+      (pathSkills[np] ??= []).push({
+        id: s.id,
+        name: s.name,
+        node_path: np,
+        preview: truncatePreview(s.content, PREVIEW_CHARS),
+        content_hash: contentHash(s.content),
+      });
+    }
   }
 
   // ── work_episode_index ──
@@ -224,6 +282,18 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
     ended_at: e.ended_at,
     confidence: e.confidence,
   }));
+
+  // ── hot_paths: most-touched recent activity paths, top 8 ──
+  const hotCounts = new Map<string, number>();
+  for (const a of input.recentActivityDigest) {
+    if (a.node_path && a.node_path !== "/") {
+      hotCounts.set(a.node_path, (hotCounts.get(a.node_path) ?? 0) + 1);
+    }
+  }
+  const hotPaths = [...hotCounts.entries()]
+    .sort((a, z) => z[1] - a[1] || a[0].localeCompare(z[0]))
+    .slice(0, 8)
+    .map(([path, count]) => ({ path, count }));
 
   const index: HookIndex = {
     schema_version: 2,
@@ -244,6 +314,8 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
   };
   if (Object.keys(filenameIndex).length > 0) index.filename_index = filenameIndex;
   if (Object.keys(skillIndex).length > 0) index.skill_invocation_index = skillIndex;
+  if (Object.keys(pathSkills).length > 0) index.path_skills = pathSkills;
   if (workEpisodeIndex.length > 0) index.work_episode_index = workEpisodeIndex;
+  if (hotPaths.length > 0) index.hot_paths = hotPaths;
   return index;
 }

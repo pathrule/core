@@ -28,11 +28,16 @@ import { atomicWrite } from "@pathrule/shared/local-runtime/atomic-write.js";
 import { cliPlatform } from "./platform.js";
 
 declare const __BUILD_HOOK_SCRIPT_SOURCE__: string;
+declare const __BUILD_EMBED_HELPER_SOURCE__: string;
 
 // In tests / dev / type-checking the define is not substituted; fall back
 // to an empty string so we can mock or read the source from disk.
 const EMBEDDED_HOOK_SCRIPT: string =
   typeof __BUILD_HOOK_SCRIPT_SOURCE__ === "string" ? __BUILD_HOOK_SCRIPT_SOURCE__ : "";
+// The prompt-embedding helper the hook spawns for relevance ranking. Written
+// next to the hook; if absent the hook degrades to lexical ranking.
+const EMBEDDED_EMBED_HELPER: string =
+  typeof __BUILD_EMBED_HELPER_SOURCE__ === "string" ? __BUILD_EMBED_HELPER_SOURCE__ : "";
 
 const WINDOWS_CMD_SHIM = `@echo off
 node "%~dp0pathrule-hook.js" %*
@@ -52,6 +57,8 @@ export interface HookScriptInstallResult {
 export interface HookScriptInstallOptions {
   /** Override the embedded script source (tests only). */
   scriptSource?: string;
+  /** Override the embedded embed-query.cjs source (tests only). */
+  embedHelperSource?: string;
 }
 
 /**
@@ -65,6 +72,7 @@ export function resolveCliHookScriptPaths(env: NodeJS.ProcessEnv = process.env):
   scriptPath: string;
   shimPath: string | null;
   hookCommandPath: string;
+  embedHelperPath: string;
 } {
   const platform = cliPlatform(env);
   const home = pathruleHome(env);
@@ -73,7 +81,8 @@ export function resolveCliHookScriptPaths(env: NodeJS.ProcessEnv = process.env):
   const shimPath =
     platform === "win32" ? joinPathForPlatform(platform, binDir, "pathrule-hook.cmd") : null;
   const hookCommandPath = platform === "win32" && shimPath ? shimPath : scriptPath;
-  return { binDir, scriptPath, shimPath, hookCommandPath };
+  const embedHelperPath = joinPathForPlatform(platform, binDir, "embed-query.cjs");
+  return { binDir, scriptPath, shimPath, hookCommandPath, embedHelperPath };
 }
 
 /**
@@ -85,7 +94,8 @@ export async function installCliHookScript(
   env: NodeJS.ProcessEnv = process.env,
   opts: HookScriptInstallOptions = {},
 ): Promise<HookScriptInstallResult> {
-  const { binDir, scriptPath, shimPath, hookCommandPath } = resolveCliHookScriptPaths(env);
+  const { binDir, scriptPath, shimPath, hookCommandPath, embedHelperPath } =
+    resolveCliHookScriptPaths(env);
   const platform = cliPlatform(env);
   const source = opts.scriptSource ?? EMBEDDED_HOOK_SCRIPT;
 
@@ -99,6 +109,14 @@ export async function installCliHookScript(
 
   // atomicWrite (via writeIfChanged) creates the parent dir, so no explicit mkdir.
   const changed = await writeIfChanged(scriptPath, source);
+
+  // Write the embed helper next to the hook. Best-effort: an empty source (dev /
+  // type-check, where the define is not substituted) just skips the write — the
+  // hook then degrades to lexical ranking rather than failing the whole sync.
+  const embedSource = opts.embedHelperSource ?? EMBEDDED_EMBED_HELPER;
+  if (embedSource && embedSource.length > 0) {
+    await writeIfChanged(embedHelperPath, embedSource);
+  }
   if (platform !== "win32") {
     // Best-effort executable bit so users running the script directly get
     // a friendly error instead of "permission denied".

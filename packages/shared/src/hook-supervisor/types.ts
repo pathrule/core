@@ -136,6 +136,8 @@ export interface MemoryStub {
    * pathrule_read_memory for the canonical version).
    */
   body?: string;
+  /** sha256(content) prefix — change-detection key for delta injection. */
+  content_hash?: string;
   /** Internal scoring tags derived at index build time. Not shown in the app UI. */
   semantic_tags?: string[];
 }
@@ -172,8 +174,20 @@ export interface RuleStub {
    * independent. If empty/missing, falls back to keyword-token relevance.
    */
   symbols?: string[];
+  /** sha256(content) prefix — change-detection key for delta injection. */
+  content_hash?: string;
   /** Internal scoring tags derived at index build time. Not shown in the app UI. */
   semantic_tags?: string[];
+}
+
+// Path-scoped skill stub (mirrors MemoryStub) so the hook can find a
+// routed path's skills and rank them against the prompt for top-k body delivery.
+export interface SkillStub {
+  id: string;
+  name: string;
+  node_path: string;
+  preview: string;
+  content_hash?: string;
 }
 
 export interface SkillInvocationStub {
@@ -184,6 +198,8 @@ export interface SkillInvocationStub {
   node_path: string | null;
   preview: string;
   body?: string;
+  /** sha256(content) prefix — change-detection key for delta injection. */
+  content_hash?: string;
   /** Internal scoring tags derived from skill tags + content. Not shown in companion files. */
   semantic_tags?: string[];
 }
@@ -220,6 +236,8 @@ export interface HookIndex {
 
   /** Map: node_path → memories tagged at that path. Lookup walks parent chain. */
   path_memories: Record<string, MemoryStub[]>;
+  /** Path-scoped skills (mirrors path_memories) for relevance top-k. */
+  path_skills?: Record<string, SkillStub[]>;
   /** Map: node_path → rules scoped to that path. */
   path_rules: Record<string, RuleStub[]>;
 
@@ -235,6 +253,35 @@ export interface HookIndex {
   /** Refresh queue counts are prompt-gated by the hook; not automatically injected. */
   pending_refresh_count?: number;
   in_progress_refresh_count?: number;
+
+  /**
+   * Native Knowledge Compilation: true when this workspace's knowledge has
+   * been compiled into per-directory native instruction files (CLAUDE.md /
+   * AGENTS.md / Cursor / Copilot). The hook then stops injecting memory
+   * content on PreToolUse (the agent already sees it at turn zero) and keeps
+   * only guard (strict deny) + live-delta duties.
+   */
+  knowledge_compiled?: boolean;
+  /** Memory ids whose BODY is in the FULL compiled file — full clients skip these in delta injection. */
+  compiled_memory_ids?: string[];
+
+  /**
+   * Slim (router) projection ids. For clients with a prompt-time body
+   * channel (Claude), the per-dir file carries memory/skill TITLES, not bodies;
+   * the hook delivers the prompt-relevant bodies. `indexed_memory_ids` are the
+   * title-only memories (their bodies are eligible for hook top-k injection),
+   * and `compiled_rule_ids` are rules whose FULL body is already in that slim
+   * file (so the hook must NOT re-inject them — rules are floored, turn-zero).
+   * Empty/absent when no slim render exists.
+   */
+  indexed_memory_ids?: string[];
+  compiled_rule_ids?: string[];
+
+  /**
+   * Navigation Engine: most-touched paths from recent activity (top ~8),
+   * derived at index build time. A routing signal: "the team works here".
+   */
+  hot_paths?: Array<{ path: string; count: number }>;
 
   /** Populated when failures recur. */
   fail_patterns?: FailPatternStub[];

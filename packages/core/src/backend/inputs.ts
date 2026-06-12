@@ -11,6 +11,30 @@ export interface ContextScope {
   relativePath: string;
 }
 
+/**
+ * One full-body warehouse entry. The matching hook-index carries only
+ * stubs + content_hash; the warehouse carries the bodies, addressable by id,
+ * read selectively for delta delivery. `content_hash` matches the index's.
+ */
+export interface WarehouseEntry {
+  type: "memory" | "rule" | "skill";
+  title: string;
+  body: string;
+  content_hash: string;
+}
+
+/** The full-body warehouse: every memory/rule/skill keyed by id. */
+export type Warehouse = Record<string, WarehouseEntry>;
+
+/**
+ * Precomputed embedding vectors keyed by item id (memory; skills later).
+ * Written next to the warehouse as `embeddings.json` so the hook can rank a
+ * routed path's items against the prompt embedding with no network at index
+ * time. Produced by KnowledgeBackend.buildEmbeddingsPayload; absent ⇒ the hook
+ * falls back to lexical selection (no key / no store).
+ */
+export type EmbeddingsPayload = Record<string, number[]>;
+
 // ── Memory ────────────────────────────────────────────────────────────────
 export interface WriteMemoryInput {
   workspaceId: string;

@@ -743,6 +743,13 @@ export function runKnowledgeBackendContract(
         expect(idx!.skill_invocation_index?.["deploy"]?.[0]?.name).toBe("Deploy");
         expect(idx!.filename_index?.["config.json"]).toContain(mem.id);
         expect(idx!.pending_refresh_count).toBe(0);
+
+        // The warehouse carries FULL bodies keyed by id, with content_hash
+        // matching the index stub (so the delta gate can compare).
+        const warehouse = await b.buildWarehousePayload?.(WS);
+        expect(warehouse).toBeTruthy();
+        expect(warehouse![mem.id]).toMatchObject({ type: "memory", title: "config.json setup", body: "how to configure" });
+        expect(warehouse![mem.id]!.content_hash).toBe(idx!.path_memories["/api"]![0]!.content_hash);
       });
 
       it("logActivity returns the persisted row, defaults node_path, and normalizes subjects", async () => {
@@ -886,6 +893,41 @@ export function runKnowledgeBackendContract(
         expect(ids).toContain(alpha.id);
         expect(res?.payload?.candidates.every((c) => c.source === "semantic")).toBe(true);
         expect(res?.payload?.searched_scope.matched_node_path).toBe("/");
+      });
+
+      it("buildEmbeddingsPayload projects the on-write store: id→vector, active only", async () => {
+        const b = makeBackend();
+        if (!b.capabilities().semantic || !b.buildEmbeddingsPayload) return;
+        const alpha = await b.writeMemory({
+          workspaceId: WS,
+          nodeId: "n1",
+          title: "alpha topic",
+          content: "all about alpha",
+        });
+        const beta = await b.writeMemory({
+          workspaceId: WS,
+          nodeId: "n1",
+          title: "beta topic",
+          content: "beta beta",
+        });
+        // Skills are embedded on demand into the same payload.
+        const skill = await b.writeSkill({
+          workspaceId: WS,
+          name: "alpha skill",
+          content: "all about alpha",
+        });
+        const payload = await b.buildEmbeddingsPayload(WS);
+        expect(payload).toBeTruthy();
+        expect(Object.keys(payload!).sort()).toEqual([alpha.id, beta.id, skill.id].sort());
+        expect(payload![alpha.id]).toHaveLength(3); // CONTRACT_TEST_EMBED dims
+        expect(payload![skill.id]).toHaveLength(3); // skill embedded too
+        expect(Array.isArray(payload![alpha.id])).toBe(true);
+
+        // A deleted (soft) memory drops out of the payload — both backends join
+        // only active memories; the skill stays.
+        await b.deleteMemory({ id: beta.id });
+        const after = await b.buildEmbeddingsPayload(WS);
+        expect(Object.keys(after ?? {}).sort()).toEqual([alpha.id, skill.id].sort());
       });
 
       it("drops direct (already-shown) ids and marks lexical overlap on title-only ids", async () => {
