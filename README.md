@@ -126,6 +126,11 @@ flowchart LR
   exact path being touched. The agent is reminded _before_ it acts, not after it fails.
 - **SQLite is the source of truth.** WAL mode, `0600` permissions, one file per workspace. It is
   not a cache of any cloud; in this edition there is no cloud.
+- **Measured, not asserted.** The efficiency of path-scoped delivery versus dumping a whole
+  knowledge base into one instruction file is benchmarked in the open at
+  [pathrule/benchmarks](https://github.com/pathrule/benchmarks): a real pinned repository,
+  mechanical fact/action scoring across Claude and Codex, and a report that publishes the cells
+  where Pathrule costs more. Semantic embedding ranking is an additive layer, measured separately.
 
 ## 🔑 Optional bring-your-own-key intelligence
 
