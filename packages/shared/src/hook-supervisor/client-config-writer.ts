@@ -107,7 +107,7 @@ export function renderCursorHooks(config: HookConfig): string {
 // hookSpecificOutput.additionalContext for context injection, decision/
 // permissionDecision for blocks. The only divergences are tool names
 // (apply_patch instead of Edit/Write, no Read hook) and the activation
-// requirement (config.toml [features] codex_hooks = true).
+// requirement (config.toml [features] hooks = true).
 const CODEX_TOOL_SET = new Set(["Bash", "apply_patch"]);
 
 const CODEX_SUPPORTED_EVENTS = new Set<HookEventName>([

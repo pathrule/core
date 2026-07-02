@@ -189,6 +189,14 @@ export function assembleKnowledgeNodes(
         }
       }
     }
+    // Slim mode indexes items by title/name only (no id). Tell the agent how to
+    // get the editing handle cheaply so it never reverse-engineers an id by
+    // pulling the tree + reading candidate bodies (the ~109k-token id hunt).
+    if (mode === "slim" && (indexedMemoryIds.length > 0 || indexedSkillIds.length > 0)) {
+      tryPush(
+        "\n> To edit an indexed item, call `pathrule_resolve` with its exact title/name for its id + version_id in one step (do NOT search the tree for the id), then `pathrule_update_*` — use `content_edit` (append / str_replace / replace_section) for small changes instead of resending the whole body.",
+      );
+    }
     if (truncated) {
       lines.push(
         "\n_Some items were omitted for size; ask Pathrule (pathrule_get_context) for the rest._",

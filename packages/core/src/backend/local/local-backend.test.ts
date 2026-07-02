@@ -69,3 +69,54 @@ describe("LocalBackend workspace resolution", () => {
     expect(viaReal?.relativePath).toBe("/src");
   });
 });
+
+describe("LocalBackend moveNodePath", () => {
+  const make = () => {
+    let n = 0;
+    const b = new LocalBackend(":memory:", { genId: () => `id-${++n}`, now: () => "2026-06-24T00:00:00.000Z" });
+    b.registerWorkspace({ workspaceId: "ws", localRootPath: "/repo" });
+    return b;
+  };
+
+  it("re-homes a folder node and its descendants, keeping attached content", async () => {
+    const b = make();
+    // /a/b carries a memory; /a is the folder we move.
+    const leaf = await b.ensureNodeForPath("ws", "/a/b", "folder");
+    const mem = await b.writeMemory({ workspaceId: "ws", nodeId: leaf.id, title: "T", content: "C" });
+
+    const res = await b.moveNodePath("ws", "/a", "/c");
+    expect(res.moved).toBe(true);
+
+    const tree = await b.getTree("ws");
+    const paths = tree.map((node) => node.relativePath).sort();
+    expect(paths).toContain("/c");
+    expect(paths).toContain("/c/b");
+    expect(paths).not.toContain("/a");
+    expect(paths).not.toContain("/a/b");
+
+    // The memory is still attached to the (now repathed) leaf node.
+    const movedLeaf = await b.findNodeByPath("ws", "/c/b");
+    expect(movedLeaf?.id).toBe(leaf.id);
+    const content = await b.getNodeContent(leaf.id);
+    expect(content.memories.map((m) => m.id)).toContain(mem.id);
+  });
+
+  it("is a no-op when no node exists at the source path", async () => {
+    const b = make();
+    const res = await b.moveNodePath("ws", "/nope", "/dest");
+    expect(res.moved).toBe(false);
+  });
+
+  it("moves a node back out to the workspace root", async () => {
+    const b = make();
+    const leaf = await b.ensureNodeForPath("ws", "/parent/child", "folder");
+    const res = await b.moveNodePath("ws", "/parent/child", "/child");
+    expect(res.moved).toBe(true);
+
+    const moved = await b.findNodeByPath("ws", "/child");
+    expect(moved?.id).toBe(leaf.id);
+    const root = await b.findNodeByPath("ws", "/");
+    const row = (await b.getTree("ws")).find((node) => node.id === leaf.id);
+    expect(row?.parentId).toBe(root?.id);
+  });
+});

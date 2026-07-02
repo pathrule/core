@@ -1230,6 +1230,55 @@ export class LocalBackend implements KnowledgeBackend {
     return Promise.resolve(parent);
   }
 
+  /**
+   * Re-homes a node subtree to follow a filesystem move (Explorer cut+paste /
+   * drag&drop). The node carrying a folder's memories/rules/skills moves with
+   * the folder so attached content is never orphaned at the old path. Mirrors
+   * the cloud moveNodeSubtree. No-op when no node exists at `oldPath` (a pure
+   * filesystem move of a path that never received Pathrule content).
+   */
+  async moveNodePath(
+    workspaceId: string,
+    oldPath: string,
+    newPath: string,
+  ): Promise<{ moved: boolean }> {
+    const from = normalizeNodePath(oldPath);
+    const to = normalizeNodePath(newPath);
+    if (from === to || from === "/") return { moved: false };
+
+    const top = this.selectNodeByPath(workspaceId, from);
+    if (!top) return { moved: false };
+
+    const newParentPath = to.slice(0, to.lastIndexOf("/")) || "/";
+    const newParent = await this.ensureNodeForPath(workspaceId, newParentPath, "folder");
+    const newName = to.slice(to.lastIndexOf("/") + 1) || top.name;
+    const ts = this.now();
+
+    // Descendants are repathed by prefix-swap; parent_id inside the subtree is
+    // unchanged. Filter in JS (workspaces are small) to avoid LIKE wildcards.
+    const descendants = (
+      this.db
+        .prepare("SELECT id, relative_path FROM nodes WHERE workspace_id = ?")
+        .all(workspaceId) as Array<{ id: string; relative_path: string }>
+    ).filter((d) => d.relative_path.startsWith(`${from}/`));
+
+    const apply = this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE nodes SET parent_id = ?, name = ?, relative_path = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(newParent.id, newName, to, ts, top.id);
+      const upd = this.db.prepare(
+        "UPDATE nodes SET relative_path = ?, updated_at = ? WHERE id = ?",
+      );
+      for (const d of descendants) {
+        upd.run(`${to}${d.relative_path.slice(from.length)}`, ts, d.id);
+      }
+    });
+    apply();
+    return { moved: true };
+  }
+
   // ── write guards / dedup ─────────────────────────────────────────────────
   isDemoWorkspace(_workspaceId: string): Promise<boolean> {
     return Promise.resolve(false); // OSS has no read-only demo workspaces.

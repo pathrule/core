@@ -7,7 +7,7 @@
 //   2. .codex/hooks.json — JSON hook config. Same shape Claude expects;
 //      ensureCodexHooks merger preserves any user-defined hooks under
 //      unrelated event keys.
-//   3. .codex/config.toml — appends `[features] codex_hooks = true` inside a
+//   3. .codex/config.toml — appends `[features] hooks = true` inside a
 //      marker-bound block so Codex actually loads hooks at all. User TOML
 //      content is preserved by the ensureCodexConfigToml merger.
 //

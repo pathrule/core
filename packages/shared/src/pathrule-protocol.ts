@@ -48,6 +48,7 @@ export const PATHRULE_PROTOCOL: PathruleProtocol = {
   ],
   during: [
     "Path-first writes: write_memory / write_rule / write_skill take a node_path string (e.g. '/apps/mobile'). Target the most specific path; missing nodes auto-create.",
+    "Fast edits: to UPDATE an existing memory/rule/skill you know by title/name (e.g. one shown in the compiled knowledge), call pathrule_resolve(query: <its title/name>) ONCE to get its id + version_id — do NOT pull the tree, list items, or read candidate bodies to hunt for the id. Then call pathrule_update_* with `content_edit` (append / str_replace / replace_section) to send only the delta; reserve full `content` (or patch.content) for a genuine rewrite. This is the required path — the old id-hunt wastes tens of thousands of tokens.",
     "Never use local file-based memory (~/.claude/memory/, MEMORY.md). Pathrule is the single source of truth for all persistent knowledge.",
     "After every write, summarise what you did in natural language — don't paste raw tool JSON.",
   ],
@@ -427,9 +428,12 @@ export function ensureCodexHooks(
 }
 
 // ---------------------------------------------------------------------------
-// .codex/config.toml merge — Codex requires `[features] codex_hooks = true`
-// to load hooks. We add this as a marker-bound block at the end of whatever
-// TOML the user already has, leaving every other key alone. Idempotent.
+// .codex/config.toml merge — Codex requires `[features] hooks = true` to load
+// hooks. (The older `codex_hooks` key is deprecated; Codex emits a deprecation
+// warning when it sees it.) We add this as a marker-bound block at the end of
+// whatever TOML the user already has, leaving every other key alone. The
+// marker-bound merger replaces an older block on the next render, so existing
+// `codex_hooks` configs migrate automatically. Idempotent.
 // ---------------------------------------------------------------------------
 
 const CODEX_TOML_START = "# >>> Pathrule managed (codex hook activation) >>>";
@@ -437,7 +441,7 @@ const CODEX_TOML_END = "# <<< Pathrule managed <<<";
 const CODEX_TOML_BLOCK = [
   CODEX_TOML_START,
   "[features]",
-  "codex_hooks = true",
+  "hooks = true",
   CODEX_TOML_END,
   "",
 ].join("\n");

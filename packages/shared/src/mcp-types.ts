@@ -12,6 +12,49 @@ export interface McpServerEntry {
   env?: Record<string, string>;
 }
 
+/** A user-managed third-party MCP server shown in the Studio integrations
+ *  panel. `stdio` carries command/args/env; `http` (remote/SSE) carries a url. */
+export interface StudioMcpServer {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  /** HTTP auth/headers (e.g. { Authorization: "Bearer …" }) for remote servers. */
+  headers?: Record<string, string>;
+  /** True when parked in the disabled sidecar (not written to the live config). */
+  disabled?: boolean;
+  /** `user` = the user config (`~/.claude.json`, managed by this surface);
+   *  `project` = the workspace's checked-in `.mcp.json` (read-only here);
+   *  `plugin` = bundled by an installed Claude plugin (global, read-only). When
+   *  unset, treat as `user`. */
+  origin?: "user" | "project" | "plugin";
+}
+
+/** A Claude subagent definition discovered on disk (`.claude/agents/*.md`,
+ *  `~/.claude/agents`, or an installed plugin's `agents/`). Shown in the Studio
+ *  integrations panel's Agents tab. Read-only (defined by files / plugins). */
+export interface StudioAgent {
+  /** Agent name (frontmatter `name`, else the file name). */
+  name: string;
+  /** Frontmatter `description` (when/why the agent is used), or "". */
+  description: string;
+  /** Frontmatter `tools` allowlist as written (e.g. "Read, Bash"), if present. */
+  tools?: string;
+  /** Frontmatter `model` (e.g. "sonnet", "haiku"), if present. */
+  model?: string;
+  /** `project` = workspace `.claude/agents`; `user` = `~/.claude/agents`;
+   *  `plugin` = bundled by an installed plugin. user+plugin are "global". */
+  origin: "project" | "user" | "plugin";
+  /** Human label of the source (".claude/agents" or the plugin name). */
+  source: string;
+}
+
+/** Best-effort reachability of a third-party MCP server, computed by Studio
+ *  (not Claude's live runtime): a launch test (stdio) or a probe (http). */
+export type StudioMcpStatus = "connected" | "auth" | "error";
+
 /**
  * Aggregated MCP status snapshot across all supported AI clients
  * (Claude Code, Cursor, Codex, Windsurf). Used by the TopBar chip and
