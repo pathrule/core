@@ -4,6 +4,8 @@
 // code (and its client-SDK dependency) into this shared export set.
 // nodes.ts re-exports these — every existing import path keeps working.
 
+import { isDirectoryLeafName, lastSegment } from "@pathrule/core/paths/leaf-type.js";
+
 import type { NodeType } from "../node-types.js";
 
 export interface MaterialisedNode {
@@ -31,9 +33,16 @@ export function normalizeNodePath(raw: string): string {
   return collapsed === "/" ? "/" : collapsed.replace(/\/$/, "");
 }
 
-/** Heuristic: "name.ext" with 1-8 char extension is a file; anything else a folder. */
+/**
+ * Leaf classification. Delegates to the shared classifier in @pathrule/core so
+ * node materialisation, knowledge compilation, and the client renderers can
+ * never disagree about what a directory is.
+ *
+ * The rule it replaced was `\.[A-Za-z0-9]{1,8}$`, an extension-length test born
+ * of web/TS naming that called `.gitignore`, `MyApp.entitlements`,
+ * `Main.storyboard`, and `gradle.properties` folders, i.e. it failed on
+ * essentially every iOS and Android repo.
+ */
 export function guessLeafType(relativePath: string): NodeType {
-  const segments = relativePath.split("/").filter((s) => s.length > 0);
-  const last = segments[segments.length - 1] ?? "";
-  return /\.[A-Za-z0-9]{1,8}$/.test(last) ? "file" : "folder";
+  return isDirectoryLeafName(lastSegment(relativePath)) ? "folder" : "file";
 }

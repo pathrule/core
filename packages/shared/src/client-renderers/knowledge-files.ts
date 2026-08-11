@@ -14,6 +14,7 @@
 // files — so a directory whose knowledge was removed gets its stale file
 // cleaned up on the next sync.
 
+import { isDirectoryLeafName } from "@pathrule/core/paths/leaf-type.js";
 import type { CompiledKnowledgeNode } from "@pathrule/core";
 import type { MultiClientInput, RenderedFile } from "./types.js";
 
@@ -80,8 +81,10 @@ export function knowledgeOwnedPaths(
     const p = n.relative_path;
     if (typeof p === "string" && p.length > 0 && p !== "/") {
       // Only directory-looking nodes get standalone files; file nodes fold up.
+      // Shared classifier: a file must never be treated as a directory, or we
+      // would try to write `.gitignore/CLAUDE.md`.
       const last = p.split("/").filter(Boolean).pop() ?? "";
-      if (!/\.[A-Za-z0-9]{1,8}$/.test(last)) dirs.add(p);
+      if (isDirectoryLeafName(last)) dirs.add(p);
     }
   }
   for (const k of subdirKnowledge(input)) dirs.add(k.dir_path);

@@ -94,7 +94,7 @@ export async function installCliHookScript(
   env: NodeJS.ProcessEnv = process.env,
   opts: HookScriptInstallOptions = {},
 ): Promise<HookScriptInstallResult> {
-  const { binDir, scriptPath, shimPath, hookCommandPath, embedHelperPath } =
+  const { scriptPath, shimPath, hookCommandPath, embedHelperPath } =
     resolveCliHookScriptPaths(env);
   const platform = cliPlatform(env);
   const source = opts.scriptSource ?? EMBEDDED_HOOK_SCRIPT;

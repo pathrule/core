@@ -4,9 +4,11 @@
 // and the MCP server import this directly — DO NOT re-export from the
 // shared barrel (sandboxed preload + renderer would crash).
 
-import { access, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { constants as FS_CONSTS } from "node:fs";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+import { isEntirelyPathrule, stripRegion } from "@pathrule/core/paths/region.js";
+import { isPathruleManaged } from "@pathrule/core/paths/ownership.js";
 
 import type { ClientRenderResult } from "./orchestrator.js";
 import { prepareSafeWrite } from "./safe-write.js";
@@ -15,15 +17,6 @@ import {
   recordManagedFileOwnership,
   type ManagedFileOwner,
 } from "../local-runtime/managed-file-ownership.js";
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await access(p, FS_CONSTS.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function atomicWrite(target: string, body: string): Promise<void> {
   await mkdir(dirname(target), { recursive: true });
@@ -149,9 +142,32 @@ export async function writeMultiClientFiles(opts: DiskWriteOptions): Promise<Dis
       const abs = join(opts.workspaceRoot, owned);
       const current = await readIfExists(abs);
       if (current === null) continue;
-      if (!current.includes("Pathrule managed") && !current.includes("managed by Pathrule")) {
+
+      if (!isPathruleManaged(current)) {
         continue; // user-authored file at an owned path — leave it untouched
       }
+
+      // A file carrying our REGION is mostly the user's. Deleting it because it
+      // "looks like ours" would destroy their instructions, so retract only the
+      // region and leave the file (and their content) in place.
+      if (!isEntirelyPathrule(current)) {
+        const retracted = stripRegion(current).trimEnd();
+        const body = retracted === "" ? "" : `${retracted}\n`;
+        if (body !== current) {
+          try {
+            await atomicWrite(abs, body);
+            result.written += 1;
+          } catch (err) {
+            result.errors.push({
+              path: owned,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        removedThisRun.add(owned); // no longer a Pathrule-owned file
+        continue;
+      }
+
       const removed = await unlinkIfExists(abs);
       if (removed) {
         result.removed += 1;

@@ -4,7 +4,6 @@
 
 import type { CompiledKnowledgeNode } from "@pathrule/core";
 import type { WorkspaceOverviewNode } from "../tools/tree.js";
-import type { RecentActivityEntry, RootMemory, RootRule, RootSkill } from "../claude-md-project.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Promoted Rules Bundle
@@ -39,15 +38,20 @@ export interface PromotedRulesBundle {
   rendered_at: string;
 }
 
+/**
+ * Everything the per-client renderers actually read.
+ *
+ * `rootContext`, `recentActivities` and `hotPaths` used to live here. No
+ * renderer ever read them (`renderProtocolBody` even marks its parameter
+ * `_input`), yet both gather paths queried them on every rerender: a
+ * `get_context` call plus an activities read, in the local AND the cloud
+ * edition. They were removed rather than left optional, so nobody has to guess
+ * again whether they matter. Recent activities and hot paths remain live inputs
+ * for the ROUTER and the briefing, which are different contracts.
+ */
 export interface MultiClientInput {
   workspaceName: string;
-  rootContext: {
-    memories: RootMemory[];
-    rules: RootRule[];
-    skills: RootSkill[];
-  };
   overview: WorkspaceOverviewNode[];
-  recentActivities?: RecentActivityEntry[];
   /** Promoted rules bundle; undefined when feature flag is off or no promoted rules exist. */
   promotedRules?: PromotedRulesBundle;
   /**

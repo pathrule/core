@@ -46,6 +46,8 @@ export interface WriteMemoryInput {
 }
 export interface UpdateMemoryInput {
   id: string;
+  /** Optional optimistic guard. A mismatched current version must not be overwritten. */
+  expectedVersionId?: string;
   title?: string;
   content?: string;
   /** Re-home the memory to a different node (the move_to_path target, already resolved). */
@@ -90,6 +92,8 @@ export interface WriteRuleInput {
 }
 export interface UpdateRuleInput {
   id: string;
+  /** Optional optimistic guard. A mismatched current version must not be overwritten. */
+  expectedVersionId?: string;
   name?: string;
   content?: string;
   scopeType?: "folder" | "file_type" | "project";
@@ -116,6 +120,8 @@ export interface WriteSkillInput {
 }
 export interface UpdateSkillInput {
   id: string;
+  /** Optional optimistic guard. A mismatched current version must not be overwritten. */
+  expectedVersionId?: string;
   name?: string;
   content?: string;
   /** null clears the description; undefined keeps it. */
@@ -149,6 +155,23 @@ export interface ActivityFriction {
   toolFailureCount?: number;
   toolFailureCodes?: string[];
 }
+export interface ActivityTeamIntelligenceSignal {
+  score: number;
+  category:
+    | "architecture"
+    | "coding_style"
+    | "debugging"
+    | "design"
+    | "testing"
+    | "review"
+    | "planning"
+    | "release"
+    | "security"
+    | "collaboration"
+    | "ai_usage"
+    | "other";
+  surface: "chat" | "tasks" | "design";
+}
 export interface LogActivityInput {
   workspaceId: string;
   nodePath?: string;
@@ -169,6 +192,22 @@ export interface LogActivityInput {
    * (the affinity model is a hosted-only curation surface).
    */
   appliedMemoryIds?: string[];
+  /**
+   * Exploration-suppression signal (observational). Read-only discovery
+   * calls (Grep/Glob/Read/...), file-writing calls, and the derived sufficiency
+   * verdict for this turn. The hosted edition persists them on the activity row;
+   * LocalBackend ignores (the measurement surface is hosted-only). Omit for a turn
+   * with no tool stream (then the row stays `unknown` / NULL).
+   */
+  exploreCalls?: number;
+  editCalls?: number;
+  contextSufficiency?: "sufficient" | "explored" | "unknown";
+  /**
+   * Studio Team Intelligence signal derived from an explicit prompt preference.
+   * Hosted-only, compact, and absent for ordinary activities. The raw prompt is
+   * never carried here.
+   */
+  teamIntelligenceSignal?: ActivityTeamIntelligenceSignal;
 }
 /** The persisted activity row, returned by `logActivity` so callers can echo id/created_at. */
 export interface ActivityRecord {
@@ -189,6 +228,13 @@ export interface ActivityRecord {
   toolCallCount?: number;
   toolFailureCount?: number;
   toolFailureCodes?: string[];
+  /** Exploration-suppression signal (hosted-only; undefined on LocalBackend / legacy rows). */
+  exploreCalls?: number;
+  editCalls?: number;
+  contextSufficiency?: "sufficient" | "explored" | "unknown";
+  teamIntelligenceScore?: number;
+  teamIntelligenceCategory?: ActivityTeamIntelligenceSignal["category"];
+  teamIntelligenceSurface?: ActivityTeamIntelligenceSignal["surface"];
 }
 /** Lean activity projection for `recentActivities` / context assembly. */
 export interface Activity {

@@ -8,9 +8,8 @@
 import type { CompiledKnowledgeNode, KnowledgeBackend, KnowledgeRenderMode } from "@pathrule/core";
 
 import type { AgentTargetId } from "../skills/agent-targets.js";
-import { getContextHandler, getWorkspaceOverviewHandler } from "../tools/tree.js";
+import { getWorkspaceOverviewHandler } from "../tools/tree.js";
 import type { ToolContext } from "../tools/types.js";
-import type { RecentActivityEntry } from "../claude-md-project.js";
 
 import { getRenderer } from "./registry.js";
 import type {
@@ -49,64 +48,28 @@ export async function gatherLocalMultiClientInput(
     backend: args.backend,
   };
 
-  const [ctxRes, overviewRes, recentActivities, knowledge, knowledgeSlim] = await Promise.all([
-    getContextHandler(ctx, { workspace_id: args.workspaceId, relative_path: "/" }),
+  // Only what the renderers read. A `get_context` call and a recent-activities
+  // read used to run here too, feeding `rootContext` / `recentActivities` —
+  // fields no renderer ever consumed, on a path that reruns after every content
+  // mutation.
+  const [overviewRes, knowledge, knowledgeSlim] = await Promise.all([
     getWorkspaceOverviewHandler(ctx, { workspace_id: args.workspaceId }),
-    fetchLocalRecentActivities(args.backend, args.workspaceId),
     fetchKnowledge(args.backend, args.workspaceId),
     fetchKnowledge(args.backend, args.workspaceId, "slim"),
   ]);
 
-  if (!ctxRes.ok) {
-    throw new Error(`getContext failed: ${ctxRes.error.message}`);
-  }
   if (!overviewRes.ok) {
     throw new Error(`getWorkspaceOverview failed: ${overviewRes.error.message}`);
   }
 
   return {
     workspaceName: args.workspaceName,
-    rootContext: {
-      memories: ctxRes.data.memories.map((m) => ({
-        id: m.id,
-        title: m.title,
-        preview: m.preview,
-      })),
-      rules: ctxRes.data.rules,
-      skills: ctxRes.data.skills.map((s) => ({
-        id: s.id,
-        name: s.name,
-        description: s.description,
-        source: s.source,
-      })),
-    },
     overview: overviewRes.data,
-    recentActivities: recentActivities.length > 0 ? recentActivities : undefined,
     // Promoted rules are a cloud-only RPC; the local edition has no equivalent.
     promotedRules: undefined,
     knowledge: knowledge ?? undefined,
     knowledgeSlim: knowledgeSlim ?? undefined,
   };
-}
-
-/** Recent activity shaped from the local store (best-effort, never throws). */
-async function fetchLocalRecentActivities(
-  backend: KnowledgeBackend,
-  workspaceId: string,
-): Promise<RecentActivityEntry[]> {
-  try {
-    const acts = await backend.recentActivities({ workspaceId, relativePath: "" }, 8);
-    return acts
-      .filter((a) => a.domain && a.action)
-      .map((a) => ({
-        domain: a.domain as string,
-        action: a.action as string,
-        task_summary: a.taskSummary ?? "",
-        created_at: a.createdAt,
-      }));
-  } catch {
-    return [];
-  }
 }
 
 /** Native Knowledge Compilation payload — optional backend capability.

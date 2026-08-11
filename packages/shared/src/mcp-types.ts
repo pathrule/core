@@ -32,6 +32,14 @@ export interface StudioMcpServer {
   origin?: "user" | "project" | "plugin";
 }
 
+/** Secret-free server identity safe to expose across the Electron IPC boundary. */
+export interface StudioMcpServerSummary {
+  name: string;
+  transport: "stdio" | "http";
+  disabled?: boolean;
+  origin?: "user" | "project" | "plugin";
+}
+
 /** A Claude subagent definition discovered on disk (`.claude/agents/*.md`,
  *  `~/.claude/agents`, or an installed plugin's `agents/`). Shown in the Studio
  *  integrations panel's Agents tab. Read-only (defined by files / plugins). */
@@ -49,6 +57,8 @@ export interface StudioAgent {
   origin: "project" | "user" | "plugin";
   /** Human label of the source (".claude/agents" or the plugin name). */
   source: string;
+  /** Absolute path of the markdown file, so the panel can delete it. */
+  filePath?: string;
 }
 
 /** Best-effort reachability of a third-party MCP server, computed by Studio

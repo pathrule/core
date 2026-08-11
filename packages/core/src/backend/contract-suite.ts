@@ -86,6 +86,19 @@ export function runKnowledgeBackendContract(
         expect((await b.deleteMemory({ id: "nope" })).status).toBe("rejected");
       });
 
+      it("updateMemory refuses a stale optimistic version", async () => {
+        const b = makeBackend();
+        const m = await b.writeMemory({ workspaceId: WS, title: "t", content: "c" });
+        await expect(
+          b.updateMemory({
+            id: m.id,
+            content: "must not overwrite",
+            expectedVersionId: "stale-version",
+          }),
+        ).rejects.toThrow("content_version_conflict");
+        expect((await b.readMemory(m.id))?.content).toBe("c");
+      });
+
       it("scopes lists by workspace", async () => {
         const b = makeBackend();
         await b.writeMemory({ workspaceId: WS, title: "a", content: "x" });
@@ -174,6 +187,38 @@ export function runKnowledgeBackendContract(
         expect(kept.description).toBe("keep");
         const cleared = await b.updateSkill({ id: s.id, description: null });
         expect(cleared.description).toBeNull();
+      });
+
+      it("rule and skill updates refuse stale optimistic versions", async () => {
+        const b = makeBackend();
+        const rule = await b.writeRule({
+          workspaceId: WS,
+          name: "rule",
+          content: "original",
+          scopeType: "project",
+        });
+        await expect(
+          b.updateRule({
+            id: rule.id,
+            content: "must not overwrite",
+            expectedVersionId: "stale-version",
+          }),
+        ).rejects.toThrow("content_version_conflict");
+        expect((await b.readRule(rule.id))?.content).toBe("original");
+
+        const skill = await b.writeSkill({
+          workspaceId: WS,
+          name: "skill",
+          content: "original",
+        });
+        await expect(
+          b.updateSkill({
+            id: skill.id,
+            content: "must not overwrite",
+            expectedVersionId: "stale-version",
+          }),
+        ).rejects.toThrow("content_version_conflict");
+        expect((await b.readSkill(skill.id))?.content).toBe("original");
       });
     });
 

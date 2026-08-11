@@ -86,7 +86,6 @@ describe("delta delivery (engine-level efficiency)", () => {
 
   it("re-injects only the edited item on a later turn", () => {
     const inp = input();
-    const warehouse = assembleWarehouse(inp);
     let ledger = applyDelta([], computeDelta(selectedFrom(inp), []).emit);
 
     // edit m2's body → new warehouse + new hash

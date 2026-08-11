@@ -8,7 +8,11 @@
 import type { KnowledgeBackend } from "@pathrule/core";
 
 import type { AgentTargetId } from "../skills/agent-targets.js";
-import { detectClientsOnDisk, resolveEnabledClients } from "../skills/disk-detection.js";
+import {
+  STUDIO_ENGINE_IDS,
+  detectClientsOnDisk,
+  resolveEnabledClients,
+} from "../skills/disk-detection.js";
 import { DEFAULT_ACTIVE_AGENT_TARGETS } from "../skills/agent-targets.js";
 import type { ManagedFileOwner } from "../local-runtime/managed-file-ownership.js";
 
@@ -81,6 +85,13 @@ export interface RerenderLocalArgs {
   userId: string;
   runtimeOwner?: ManagedFileOwner;
   runtimeVersion?: string;
+  /**
+   * Engines Studio can run for this workspace. Defaults to every Studio engine,
+   * because an engine that is launchable must receive knowledge whether or not
+   * its companion target was ticked in settings. Pass a narrower list from a
+   * non-Studio caller (CLI, MCP) that knows no engine is running.
+   */
+  activeEngines?: readonly string[];
 }
 
 /**
@@ -99,6 +110,9 @@ export async function rerenderMultiClientLocal(args: RerenderLocalArgs): Promise
       selected: null,
       detected,
       fallback: DEFAULT_ACTIVE_AGENT_TARGETS,
+      // A Studio-launched engine must receive knowledge regardless of which
+      // tools were ticked in settings.
+      activeEngines: args.activeEngines ?? STUDIO_ENGINE_IDS,
     });
     const targets = enabled.filter((c) => RENDER_TARGETS.includes(c));
     if (targets.length === 0) {

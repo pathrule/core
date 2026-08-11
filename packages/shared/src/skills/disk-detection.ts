@@ -80,12 +80,78 @@ export function resolveEnabledClients(input: {
   selected: readonly string[] | null | undefined;
   detected: readonly AgentTargetId[];
   fallback: readonly AgentTargetId[];
+  /**
+   * Engines Studio can actually run for this workspace (agent-gateway ids:
+   * antigravity, grok, kimi, opencode, ...). See `requiredTargetsForEngines`.
+   */
+  activeEngines?: readonly string[];
 }): AgentTargetId[] {
   const valid = new Set(Object.keys(AGENT_TARGETS) as AgentTargetId[]);
   const sel = (input.selected ?? []).filter(
     (s): s is AgentTargetId => typeof s === "string" && valid.has(s as AgentTargetId),
   );
-  if (sel.length > 0) return sel;
-  if (input.detected.length > 0) return [...input.detected];
-  return [...input.fallback];
+
+  const base = sel.length > 0 ? sel : input.detected.length > 0 ? [...input.detected] : [...input.fallback];
+  return withEngineTargets(base, input.activeEngines ?? []);
+}
+
+/**
+ * Targets that must be enabled for a set of Studio engines to receive anything.
+ *
+ * Studio can run engines that are not companion targets in their own right
+ * (antigravity, grok, kimi, opencode). They all read AGENTS.md, which Pathrule
+ * writes as part of the `codex` target — so with only `claude-code` ticked, an
+ * agent running inside Studio got no Pathrule knowledge at all. Delivery must
+ * follow the engines actually in use, not an unrelated checkbox.
+ */
+export function requiredTargetsForEngines(engines: readonly string[]): AgentTargetId[] {
+  const out = new Set<AgentTargetId>();
+  for (const engine of engines) {
+    switch (engine) {
+      case "claude-code":
+        out.add("claude-code");
+        break;
+      // Every other Studio engine reads AGENTS.md, which the codex target owns.
+      case "codex":
+      case "antigravity":
+      case "grok":
+      case "kimi":
+      case "opencode":
+        out.add("codex");
+        break;
+      default:
+        // `orchestrator` and any future id: no channel of its own. Adding an
+        // engine to studio/agent-gateway.ts AgentId without a case here fails
+        // the engine-coverage contract test, which is the point.
+        break;
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Every engine Studio can launch as a chat. Kept in sync with `AgentId` in
+ * studio/agent-gateway.ts; `orchestrator` is excluded because it dispatches to
+ * the others rather than reading instruction files itself.
+ *
+ * Sync writes use this so a running engine is never starved of knowledge just
+ * because the user ticked a different tool in settings.
+ */
+export const STUDIO_ENGINE_IDS = [
+  "claude-code",
+  "codex",
+  "opencode",
+  "grok",
+  "kimi",
+  "antigravity",
+] as const;
+
+/** Union of an enabled set with whatever the active engines require. */
+export function withEngineTargets(
+  enabled: readonly AgentTargetId[],
+  engines: readonly string[],
+): AgentTargetId[] {
+  const out = new Set<AgentTargetId>(enabled);
+  for (const target of requiredTargetsForEngines(engines)) out.add(target);
+  return [...out];
 }

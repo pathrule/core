@@ -48,7 +48,7 @@ export function renderProtocolBody(_input: MultiClientInput, options: ProtocolBo
   sections.push(
     "- Pathrule cloud is the source of truth. Do not create local memory files such as `MEMORY.md` or `~/.claude/memory/`.",
     "- Use path-first writes for lasting project knowledge: `pathrule_write_memory`, `pathrule_write_rule`, and `pathrule_write_skill` take the most specific workspace-relative `node_path`.",
-    "- Do not edit materialized local Pathrule files as the source of truth. This includes `.codex/skills/**/SKILL.md`, `.claude/skills/**`, rendered companion files, and synced skill/memory/rule files. Read only for orientation; create/update cloud records with the Pathrule MCP write/update tools.",
+    "- Do not edit materialized local Pathrule files as the source of truth. This includes `.agents/skills/**/SKILL.md`, legacy `.codex/skills/**/SKILL.md`, `.claude/skills/**`, rendered companion files, and synced skill/memory/rule files. Read only for orientation; create/update cloud records with the Pathrule MCP write/update tools.",
     "- After any file-modifying response, call `pathrule_log_activity` once with domain, action, scope, subjects, files_touched, and a concise task_summary.",
     "",
   );

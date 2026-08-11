@@ -14,6 +14,10 @@ export interface AgentTargetSpec {
   label: string;
   /** Workspace-relative directory that holds per-skill subfolders. */
   skillsDir: string;
+  /** Prior locations that may still contain user-authored files. Discovery can
+   *  warn about them, but materialization and cleanup must never write/delete
+   *  through these paths. */
+  legacySkillsDirs?: readonly string[];
   /** Workspace-relative marker file whose presence auto-detects the agent. */
   detectFile: string;
   /** Whether the materializer is implemented for this target. */
@@ -53,7 +57,8 @@ export const AGENT_TARGETS: Record<AgentTargetId, AgentTargetSpec> = {
   codex: {
     id: "codex",
     label: "Codex",
-    skillsDir: ".codex/skills",
+    skillsDir: ".agents/skills",
+    legacySkillsDirs: [".codex/skills"],
     detectFile: ".codex",
     supported: true,
   },

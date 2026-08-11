@@ -354,6 +354,9 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   async updateMemory(input: UpdateMemoryInput): Promise<Memory> {
     const existing = this.memories.get(input.id);
     if (!existing) throw new Error(`memory ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
     const next: Memory = {
       ...existing,
@@ -450,9 +453,12 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     return Promise.resolve(rule);
   }
 
-  updateRule(input: UpdateRuleInput): Promise<Rule> {
+  async updateRule(input: UpdateRuleInput): Promise<Rule> {
     const existing = this.rules.get(input.id);
     if (!existing) throw new Error(`rule ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
     const next: Rule = {
       ...existing,
@@ -468,7 +474,7 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     };
     this.rules.set(next.id, next);
     if (input.nodeId) this.ruleNodes.set(next.id, input.nodeId);
-    return Promise.resolve(next);
+    return next;
   }
 
   deleteRule(input: DeleteContentInput): Promise<DeleteContentResult> {
@@ -550,9 +556,12 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     return Promise.resolve(skill);
   }
 
-  updateSkill(input: UpdateSkillInput): Promise<Skill> {
+  async updateSkill(input: UpdateSkillInput): Promise<Skill> {
     const existing = this.skills.get(input.id);
     if (!existing) throw new Error(`skill ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
     const effectiveSource = input.source ?? existing.source;
     const next: Skill = {
@@ -575,7 +584,7 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     };
     this.skills.set(next.id, next);
     if (input.nodeId) this.skillNodes.set(next.id, input.nodeId);
-    return Promise.resolve(next);
+    return next;
   }
 
   deleteSkill(input: DeleteContentInput): Promise<DeleteContentResult> {

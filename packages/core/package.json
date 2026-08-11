@@ -10,7 +10,8 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./backend/knowledge-compiler.js": "./src/backend/knowledge-compiler.ts"
+    "./backend/knowledge-compiler.js": "./src/backend/knowledge-compiler.ts",
+    "./paths/*.js": "./src/paths/*.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -24,7 +25,7 @@
   },
   "dependencies": {
     "@pathrule/shared": "workspace:*",
-    "better-sqlite3": "^11"
+    "better-sqlite3": "^12"
   },
   "repository": {
     "type": "git",

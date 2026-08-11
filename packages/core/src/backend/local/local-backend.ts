@@ -540,23 +540,30 @@ export class LocalBackend implements KnowledgeBackend {
   async updateMemory(input: UpdateMemoryInput): Promise<Memory> {
     const existing = await this.readMemory(input.id);
     if (!existing) throw new Error(`memory ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
-    this.db
+    const nextVersionId = this.genId();
+    const result = this.db
       .prepare(
         `UPDATE memories SET title = ?, content = ?, node_id = ?, version_id = ?, version_number = ?,
-          last_edited_by = ?, last_edited_at = ?, updated_at = ? WHERE id = ?`,
+          last_edited_by = ?, last_edited_at = ?, updated_at = ?
+          WHERE id = ? AND version_id = ?`,
       )
       .run(
         input.title ?? existing.title,
         input.content ?? existing.content,
         input.nodeId ?? existing.nodeId,
-        this.genId(),
+        nextVersionId,
         existing.versionNumber + 1,
         this.principal,
         ts,
         ts,
         input.id,
+        input.expectedVersionId ?? existing.versionId,
       );
+    if (result.changes !== 1) throw new Error("content_version_conflict");
     const updated = await this.readMemory(input.id);
     if (!updated) throw new Error(`memory ${input.id} vanished after update`);
     // Re-embed only when the embedded text actually changed. A node-only re-home
@@ -734,24 +741,31 @@ export class LocalBackend implements KnowledgeBackend {
   async updateRule(input: UpdateRuleInput): Promise<Rule> {
     const existing = await this.readRule(input.id);
     if (!existing) throw new Error(`rule ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
-    this.db
+    const nextVersionId = this.genId();
+    const result = this.db
       .prepare(
         `UPDATE rules SET name = ?, content = ?, scope_type = ?, priority = ?, version_id = ?,
-          version_number = ?, last_edited_by = ?, last_edited_at = ?, updated_at = ? WHERE id = ?`,
+          version_number = ?, last_edited_by = ?, last_edited_at = ?, updated_at = ?
+          WHERE id = ? AND version_id = ?`,
       )
       .run(
         input.name ?? existing.name,
         input.content ?? existing.content,
         input.scopeType ?? existing.scopeType,
         input.priority ?? existing.priority,
-        this.genId(),
+        nextVersionId,
         existing.versionNumber + 1,
         this.principal,
         ts,
         ts,
         input.id,
+        input.expectedVersionId ?? existing.versionId,
       );
+    if (result.changes !== 1) throw new Error("content_version_conflict");
     if (input.nodeId) {
       // Re-home: replace any existing attachments with one pointing at the new node.
       this.db.prepare("DELETE FROM node_rules WHERE rule_id = ?").run(input.id);
@@ -858,6 +872,9 @@ export class LocalBackend implements KnowledgeBackend {
   async updateSkill(input: UpdateSkillInput): Promise<Skill> {
     const existing = await this.readSkill(input.id);
     if (!existing) throw new Error(`skill ${input.id} not found`);
+    if (input.expectedVersionId && input.expectedVersionId !== existing.versionId) {
+      throw new Error("content_version_conflict");
+    }
     const ts = this.now();
     // Patch only supplied fields (null clears description/github_url; never reorder).
     const sets = [
@@ -880,8 +897,11 @@ export class LocalBackend implements KnowledgeBackend {
       sets.push("content_fetched_at = ?");
       vals.push(ts);
     }
-    vals.push(input.id);
-    this.db.prepare(`UPDATE skills SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+    vals.push(input.id, input.expectedVersionId ?? existing.versionId);
+    const result = this.db
+      .prepare(`UPDATE skills SET ${sets.join(", ")} WHERE id = ? AND version_id = ?`)
+      .run(...vals);
+    if (result.changes !== 1) throw new Error("content_version_conflict");
     if (input.nodeId) {
       this.db.prepare("DELETE FROM node_skills WHERE skill_id = ?").run(input.id);
       this.db

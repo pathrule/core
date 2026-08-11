@@ -1,32 +1,32 @@
-// Safe-write policy for Pathrule-managed files. Routes per-path between
-// three regimes:
+// Safe-write policy for Pathrule-managed files. Routes per-path between four
+// regimes:
 //
-//   1. "overwrite"            — Pathrule fully owns the filename; just write.
+//   1. "overwrite":            Pathrule fully owns the filename; just write.
 //                               Used for filenames Pathrule invented (e.g.
 //                               .claude/rules/pathrule-protocol.md,
 //                               .cursor/rules/pathrule-protocol.mdc).
 //
-//   2. "backup-on-first-write" — User-canonical filename that pre-dates
-//                               Pathrule (e.g. .cursorrules, AGENTS.md,
-//                               .windsurfrules). On the first run, if the
-//                               existing on-disk content lacks Pathrule's
-//                               marker, rename it to backup.<name> (with
-//                               numeric suffix on collision) before writing
-//                               Pathrule's body. Subsequent runs: in-place
-//                               overwrite (Pathrule already owns).
+//   2. "merge-region":         DEFAULT for user-canonical instruction files
+//                               (AGENTS.md, CLAUDE.md, .cursorrules, ...).
+//                               These filenames are dictated by the client, not
+//                               chosen by us, and they usually already hold the
+//                               user's own instructions. Pathrule owns an
+//                               anchored REGION inside the file and never
+//                               touches a byte outside it: the user's content
+//                               keeps reaching the agent, nothing is moved
+//                               aside, and the git diff stays small.
 //
-//   3. "merge-<filename>"     — Structured config (JSON / TOML). Pathrule
-//                               owns specific entries inside the file but
-//                               user content elsewhere must survive. The
-//                               renderer's emitted body is the FRESH-WRITE
-//                               body; the merger transforms it against the
-//                               existing file.
+//   3. "merge":                Structured config (JSON / TOML). Pathrule owns
+//                               specific entries inside the file but user
+//                               content elsewhere must survive. The renderer's
+//                               emitted body is the FRESH-WRITE body; the
+//                               merger transforms it against the existing file.
 //
-// Node-only — uses fs/promises. Imported by disk-writer.ts.
+// Node-only: uses fs/promises. Imported by disk-writer.ts.
 
-import { access, readFile, rename } from "node:fs/promises";
-import { constants as FS_CONSTS } from "node:fs";
-import { dirname, join, basename } from "node:path";
+import { basename } from "node:path";
+
+import { mergeRegionInto } from "@pathrule/core/paths/region.js";
 
 import {
   ensureClaudeSettingsHook,
@@ -37,68 +37,38 @@ import {
 
 export type SafeWritePolicy =
   | { kind: "overwrite" }
-  | { kind: "backup-on-first-write"; markerSubstring: string }
+  | { kind: "merge-region" }
   | { kind: "merge"; merger: (existing: string | null) => { body: string; changed: boolean } };
 
-// Marker substring search inside files Pathrule owns end-to-end. If the
-// substring shows up, we know this is a Pathrule-managed file (regardless of
-// content drift) — so no backup is needed.
-const PATHRULE_MARKDOWN_MARKER = "<!-- Pathrule managed";
-const PATHRULE_CLAUDE_MARKER = "<!-- managed by Pathrule";
-const PATHRULE_TOML_MARKER = "# >>> Pathrule managed";
+// Ownership detection lives in ownership.ts (pure, barrel-exported) so the
+// dedicated root-CLAUDE.md writer shares this exact decision.
+export { isPathruleManaged } from "@pathrule/core/paths/ownership.js";
 
 export const SAFE_WRITE_POLICIES: Record<string, SafeWritePolicy> = {
   // ─── Cursor ───────────────────────────────────────────────────────────
   ".cursor/rules/pathrule-protocol.mdc": { kind: "overwrite" },
-  ".cursorrules": {
-    kind: "backup-on-first-write",
-    markerSubstring: PATHRULE_MARKDOWN_MARKER,
-  },
+  ".cursorrules": { kind: "merge-region" },
   ".cursor/hooks.json": { kind: "merge", merger: ensureCursorHooks },
 
-  // ─── Claude (parity reference — most paths flow through their own
+  // ─── Claude (parity reference: most paths flow through their own
   // bespoke pipeline in project-claude-md.ts; entries here are for any
   // call site that goes through writeMultiClientFiles) ──────────────────
   ".claude/rules/pathrule-protocol.md": { kind: "overwrite" },
   ".claude/settings.json": { kind: "merge", merger: ensureClaudeSettingsHook },
-  "CLAUDE.md": {
-    kind: "backup-on-first-write",
-    markerSubstring: PATHRULE_CLAUDE_MARKER,
-  },
+  "CLAUDE.md": { kind: "merge-region" },
 
   // ─── Codex ─────────────────────────────────────────────────────────────
-  "AGENTS.md": {
-    kind: "backup-on-first-write",
-    markerSubstring: PATHRULE_MARKDOWN_MARKER,
-  },
+  // AGENTS.md is a cross-runtime standard (Codex, OpenCode, Antigravity, Grok,
+  // Kimi, Gemini CLI all read it), so it very often already holds the user's
+  // own instructions. Region, never takeover.
+  "AGENTS.md": { kind: "merge-region" },
   ".codex/hooks.json": { kind: "merge", merger: ensureCodexHooks },
   ".codex/config.toml": { kind: "merge", merger: ensureCodexConfigToml },
 
   // ─── Windsurf ─────────────────────────────────────────────────────────
   ".windsurf/rules/pathrule-protocol.md": { kind: "overwrite" },
-  ".windsurfrules": {
-    kind: "backup-on-first-write",
-    markerSubstring: PATHRULE_MARKDOWN_MARKER,
-  },
+  ".windsurfrules": { kind: "merge-region" },
 };
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await access(p, FS_CONSTS.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function uniqueBackupPath(desired: string): Promise<string> {
-  if (!(await exists(desired))) return desired;
-  for (let i = 1; i < 1000; i += 1) {
-    const candidate = `${desired}.${i}`;
-    if (!(await exists(candidate))) return candidate;
-  }
-  throw new Error(`Could not find a free backup name near ${desired}`);
-}
 
 export interface PrepareResult {
   /** Final body to write. Null = nothing to do (already up-to-date or skipped). */
@@ -114,21 +84,20 @@ export interface PrepareResult {
  * still happens in disk-writer.ts via atomicWrite.
  *
  * Returns `finalBody = null` only when the merger reports no change AND the
- * existing on-disk body matches — this lets the caller short-circuit to a
+ * existing on-disk body matches. This lets the caller short-circuit to a
  * skip without redundant atomic-rename churn.
  */
 /**
  * Policy for paths not in the exact-match table. Nested knowledge files reuse
- * user-canonical filenames (lib/AGENTS.md, lib/CLAUDE.md), so any unknown
- * path whose basename is a known agent-instruction filename gets
- * backup-on-first-write — a pre-existing user file at that path is backed
- * up, never silently overwritten. Everything else stays "overwrite"
- * (Pathrule-invented filenames).
+ * user-canonical filenames (`packages/api/CLAUDE.md`, `lib/AGENTS.md`), and a
+ * monorepo very often already has the team's own instructions at exactly those
+ * paths, so they get the same region treatment as the root files. Everything
+ * else is a filename Pathrule invented, which it owns outright.
  */
 function fallbackPolicy(relativePath: string): SafeWritePolicy {
   const base = basename(relativePath);
   if (base === "AGENTS.md" || base === "CLAUDE.md") {
-    return { kind: "backup-on-first-write", markerSubstring: PATHRULE_MARKDOWN_MARKER };
+    return { kind: "merge-region" };
   }
   return { kind: "overwrite" };
 }
@@ -140,7 +109,6 @@ export async function prepareSafeWrite(opts: {
   existingBody: string | null;
 }): Promise<PrepareResult> {
   const policy = SAFE_WRITE_POLICIES[opts.relativePath] ?? fallbackPolicy(opts.relativePath);
-  const abs = join(opts.workspaceRoot, opts.relativePath);
 
   switch (policy.kind) {
     case "overwrite": {
@@ -148,23 +116,12 @@ export async function prepareSafeWrite(opts: {
       return { finalBody: opts.renderedBody, backupPath: null };
     }
 
-    case "backup-on-first-write": {
-      const isFirstTime =
-        opts.existingBody !== null &&
-        !opts.existingBody.includes(policy.markerSubstring) &&
-        opts.existingBody !== opts.renderedBody;
-
-      let backupPath: string | null = null;
-      if (isFirstTime) {
-        const backupAbs = await uniqueBackupPath(join(dirname(abs), `backup.${basename(abs)}`));
-        await rename(abs, backupAbs);
-        backupPath = backupAbs;
-      }
-
-      if (opts.existingBody === opts.renderedBody) {
-        return { finalBody: null, backupPath: null };
-      }
-      return { finalBody: opts.renderedBody, backupPath };
+    case "merge-region": {
+      // The decision itself lives in @pathrule/core so the dedicated
+      // root-CLAUDE.md writer and the CLI cannot drift from it.
+      const merged = mergeRegionInto(opts.existingBody, opts.renderedBody);
+      if (merged === opts.existingBody) return { finalBody: null, backupPath: null };
+      return { finalBody: merged, backupPath: null };
     }
 
     case "merge": {
@@ -176,7 +133,3 @@ export async function prepareSafeWrite(opts: {
     }
   }
 }
-
-/** Backup helper exposed for the onboarding `backupAndConsolidate` flow that
- *  needs a deterministic suffixed path without writing. */
-export { uniqueBackupPath };

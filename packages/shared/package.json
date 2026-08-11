@@ -8,6 +8,7 @@
     "./skills/agent-targets.js": "./src/skills/agent-targets.ts",
     "./skills/disk-detection.js": "./src/skills/disk-detection.ts",
     "./mcp-installers/registry.js": "./src/mcp-installers/registry.ts",
+    "./mcp-installers/codex-installer.js": "./src/mcp-installers/codex-installer.ts",
     "./client-renderers/registry.js": "./src/client-renderers/registry.ts",
     "./client-renderers/orchestrator.js": "./src/client-renderers/orchestrator.ts",
     "./client-renderers/disk-writer.js": "./src/client-renderers/disk-writer.ts",

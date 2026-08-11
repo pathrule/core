@@ -7,6 +7,21 @@ import { join } from "node:path";
 import { LocalBackend } from "./local-backend.js";
 import { SCHEMA_VERSION } from "./schema.js";
 import { resolveLocalPrincipal } from "./identity.js";
+import { resolveSqliteNativeBinding } from "./native-binding.js";
+
+/**
+ * Open a DB the way LocalBackend itself does.
+ *
+ * The white-box `user_version` probes below construct `Database` directly, so
+ * they must honour the same PATHRULE_SQLITE_NATIVE_DIR override the backend
+ * applies. Without it they load better-sqlite3's default binding, which in this
+ * monorepo is the ELECTRON-ABI copy that packages/app rebuilds in node_modules,
+ * and the probe dies on NODE_MODULE_VERSION while the backend beside it works.
+ */
+function openRaw(path: string): Database.Database {
+  const nativeBinding = resolveSqliteNativeBinding();
+  return new Database(path, nativeBinding ? { nativeBinding } : {});
+}
 
 // The canonical-store bootstrap + numbered-migration runner.
 describe("LocalBackend bootstrap", () => {
@@ -51,7 +66,7 @@ describe("LocalBackend bootstrap", () => {
     }
 
     // White-box: user_version reflects the latest applied migration.
-    const raw = new Database(dbPath);
+    const raw = openRaw(dbPath);
     expect(raw.pragma("user_version", { simple: true })).toBe(SCHEMA_VERSION);
     raw.close();
 
@@ -93,7 +108,7 @@ describe("LocalBackend bootstrap", () => {
     // Second open re-runs runMigrations(); must not throw or downgrade user_version.
     const b = LocalBackend.openForWorkspace("ws-y", env);
     b.close();
-    const raw = new Database(join(home, "ws-y", "pathrule.db"));
+    const raw = openRaw(join(home, "ws-y", "pathrule.db"));
     expect(raw.pragma("user_version", { simple: true })).toBe(SCHEMA_VERSION);
     raw.close();
   });

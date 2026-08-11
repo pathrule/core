@@ -32,7 +32,6 @@ import type {
 import type { TreeNode } from "@pathrule/shared/node-types.js";
 import type {
   RoutingResult,
-  SubtreeMemoryIndexEntry,
   SubtreeMemoryIndexResult,
 } from "@pathrule/shared/routing-types.js";
 import type { DedupCheckArgs, DedupCheckResult } from "@pathrule/shared/tools/dedup-types.js";

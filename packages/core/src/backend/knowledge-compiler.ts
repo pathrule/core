@@ -15,6 +15,7 @@
  * Pure and deterministic: same input, same bytes. No I/O, no clock.
  */
 import type { HookIndexInput } from "./hook-index.js";
+import { isDirectoryLeafName } from "../paths/leaf-type.js";
 
 /** Per-directory budget for compiled knowledge (chars ≈ tokens × 4). */
 const DIR_BUDGET_CHARS = 12_000;
@@ -69,7 +70,7 @@ const PRIORITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
 function toDirPath(nodePath: string): { dir: string; leaf?: string } {
   const clean = nodePath === "" ? "/" : nodePath;
   const last = clean.split("/").filter(Boolean).pop() ?? "";
-  const looksLikeFile = /\.[A-Za-z0-9]{1,8}$/.test(last);
+  const looksLikeFile = !isDirectoryLeafName(last);
   if (!looksLikeFile) return { dir: clean || "/" };
   const idx = clean.lastIndexOf("/");
   const dir = idx <= 0 ? "/" : clean.slice(0, idx);
