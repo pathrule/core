@@ -2,13 +2,14 @@
   <img src="assets/pathrule-banner.png" alt="Pathrule Core" width="640">
 </p>
 
-<p align="center"><strong>The context layer for AI coding agents.</strong><br/>Path-scoped, just-in-time memory, rules, and skills. Fully local. No account. Zero infrastructure.</p>
+<p align="center"><strong>The context layer for AI coding agents: your agents know your product, not just your prompt.</strong><br/>Path-scoped, just-in-time memory, rules, and skills. Fully local. No account. Zero infrastructure.</p>
 
 <p align="center">
   <a href="#-quickstart">Quickstart</a> &nbsp;·&nbsp;
   <a href="#-how-it-works">How it works</a> &nbsp;·&nbsp;
   <a href="#-editions">Editions</a> &nbsp;·&nbsp;
-  <a href="https://pathrule.io">Pathrule Cloud</a>
+  <a href="https://www.pathrule.io/products/macos">Pathrule Studio</a> &nbsp;·&nbsp;
+  <a href="https://www.pathrule.io">Website</a>
 </p>
 
 <p align="center">
@@ -27,7 +28,7 @@
 
 Your AI agent forgets everything between sessions. The usual fixes are blunt: one giant
 `CLAUDE.md` pasted into every conversation, or a memory dump the agent has to wade through.
-Pathrule is the [context layer for AI coding](https://pathrule.io/ai-coding-context-layer): it
+Pathrule is the [context layer for AI coding](https://www.pathrule.io/ai-coding-context-layer): it
 organizes the agent's knowledge **the way your repo is organized**.
 
 Memories, rules, and skills attach to **paths**. When the agent works in `/apps/api`, it gets
@@ -44,6 +45,20 @@ automatically, without you pasting anything.
 This repository is Pathrule's **open core** (Apache-2.0): the 22-tool MCP surface, the
 path-scoped context engine, and an embedded SQLite backend that runs the entire loop with zero
 infrastructure. No Docker, no Postgres, no login, no network.
+
+**Where this sits.** It is not a memory API you query, and not vector search over your repo. A
+memory API answers when something asks it; a coding agent rarely asks about a constraint it does
+not know exists. Pathrule reads the path the agent is about to act on and delivers before the
+first tool call. Similarity is a guess about relevance; a path is a fact about it. The five
+approaches teams actually use, and where each one breaks, are compared at
+[pathrule.io/ai-coding-context-layer](https://www.pathrule.io/ai-coding-context-layer).
+
+**Where the desktop app fits.** This engine also ships inside
+[Pathrule Studio](https://www.pathrule.io/products/macos), the macOS workbench that runs Claude
+Code, Codex, Grok, Kimi, OpenCode and Antigravity on one workspace, with a task board that gives
+each card its own branch and checkout, a design canvas in the same workspace as the code, and
+runtime Signals. Same context engine, same MCP contract; the CLI in this repo is the
+terminal-first way in, on macOS, Linux and Windows.
 
 ## ⚡ Quickstart
 
@@ -153,17 +168,17 @@ it is the highest-leverage key for context quality and token cost.
 Pathrule is an **open-core** product, and we try to be precise about what that means.
 Everything in this repository is free; pricing only ever applies to the hosted product.
 
-| | **Pathrule Core** (this repo) | **Self-Hosted** (enterprise) | **Pathrule Cloud** |
+| | **Pathrule Core** (this repo) | **Self-Hosted** (enterprise) | **Pathrule Cloud** (Studio, Web, CLI) |
 | --- | --- | --- | --- |
 | Best for | Solo work, fully local | Teams that keep data inside their own boundary | Zero-ops team knowledge |
-| Setup | `npm i -g @pathrule/cli`<br/>`pathrule init --local` | Signed images, Docker Compose ([talk to sales](mailto:hello@pathrule.io)) | Sign up at [pathrule.io](https://pathrule.io) |
+| Setup | `npm i -g @pathrule/cli`<br/>`pathrule init --local` | Signed images, Docker Compose ([talk to sales](mailto:hello@pathrule.io)) | Sign up at [pathrule.io](https://www.pathrule.io) |
 | Account | **none, fully offline** | your own SSO (SAML / OIDC) | required |
 | Storage | local SQLite you own | your database, on your infra | managed backend |
 | Knowledge layer: path-scoped memories/rules/skills, 22 MCP tools, get_context engine, hooks | ✅ | ✅ | ✅ (same core, literally this package) |
 | Semantic search + LLM routing | bring your own key | your key or hosted proxy | managed, no keys needed |
 | Team sync, live activity, AI curation | ✗ | ✅ on your infra | ✅ |
-| Web + desktop GUI | ✗ | ✅ | ✅ |
-| Price / license | **free**, Apache-2.0 | commercial license | [plans](https://pathrule.io/pricing) with a free Solo tier |
+| Web + desktop GUI (Pathrule Studio for macOS, Pathrule Web, the iPhone app) | ✗ | ✅ | ✅ |
+| Price / license | **free**, Apache-2.0 | commercial license | [plans](https://www.pathrule.io/pricing) with a free Solo tier |
 
 Just you, on your machine? **Core is the whole product.** A team that cannot let data leave its
 boundary? **Self-Hosted.** Zero ops? **Pathrule Cloud.**
