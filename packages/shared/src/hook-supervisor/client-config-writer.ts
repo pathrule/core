@@ -68,6 +68,15 @@ export function buildHookConfig(scriptPath?: string): HookConfig {
           hooks: [{ type: "command", command: cmd }],
         },
       ],
+      // Claude Code routes tool FAILURES here and sends no PostToolUse for them, so
+      // the friction pipe sees nothing without this matcher. Same matcher as above:
+      // these are the tools whose failures point at a file worth remembering.
+      PostToolUseFailure: [
+        {
+          matcher: "Read|Edit|Write|Bash",
+          hooks: [{ type: "command", command: cmd }],
+        },
+      ],
       UserPromptSubmit: [{ hooks: [{ type: "command", command: cmd }] }],
       Stop: [{ hooks: [{ type: "command", command: cmd }] }],
       SubagentStop: [{ hooks: [{ type: "command", command: cmd }] }],

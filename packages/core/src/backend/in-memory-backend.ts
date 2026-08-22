@@ -247,6 +247,9 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   >();
   /** workspaceId → local root path (the reference model of a workspace's local root). */
   private readonly workspaceRoots = new Map<string, string>();
+  /** Worktree path -> workspace id (the inverse keying of workspaceRoots,
+   *  because a workspace has one canonical clone but many worktrees). */
+  private readonly worktreeRoots = new Map<string, string>();
   private readonly genId: () => string;
   private readonly now: () => string;
   private readonly principal: string;
@@ -289,10 +292,21 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     this.workspaceRoots.set(input.workspaceId, input.localRootPath.replace(/\/+$/, ""));
   }
 
+  /** Extra local checkout (git worktree) bound to a workspace; mirrors
+   *  LocalBackend.registerWorktreePath. Keyed by PATH, because one workspace can
+   *  have many worktrees while a directory belongs to exactly one workspace. */
+  registerWorktreePath(input: { workspaceId: string; localRootPath: string }): void {
+    this.worktreeRoots.set(input.localRootPath.replace(/\/+$/, ""), input.workspaceId);
+  }
+
   resolveWorkspaceFromCwd(cwd: string): Promise<WorkspaceMatch | null> {
     const normalizedCwd = cwd.replace(/\/+$/, "");
-    const best = [...this.workspaceRoots.entries()]
-      .map(([wid, root]) => ({ wid, root }))
+    const best = [
+      ...[...this.workspaceRoots.entries()].map(([wid, root]) => ({ wid, root })),
+      // Worktree roots compete under the same longest-prefix rule, so a
+      // deeper canonical root is never shadowed by an outer worktree.
+      ...[...this.worktreeRoots.entries()].map(([root, wid]) => ({ wid, root })),
+    ]
       .filter((r) => pathsEqual(normalizedCwd, r.root) || pathStartsWith(normalizedCwd, r.root))
       .sort((a, b) => b.root.length - a.root.length)[0];
     if (!best) return Promise.resolve(null);
@@ -332,7 +346,10 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   async writeMemory(input: WriteMemoryInput): Promise<Memory> {
     const ts = this.now();
     const memory: Memory = {
-      id: this.genId(),
+      // A client-supplied id must be honoured here too: this backend is the reference
+      // implementation the contract suite runs against, and a mirror whose row gets a
+      // different id than the queued cloud write turns one record into two.
+      id: input.id ?? this.genId(),
       workspaceId: input.workspaceId,
       nodeId: input.nodeId ?? "",
       title: input.title,
@@ -434,7 +451,7 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   writeRule(input: WriteRuleInput): Promise<Rule> {
     const ts = this.now();
     const rule: Rule = {
-      id: this.genId(),
+      id: input.id ?? this.genId(),
       workspaceId: input.workspaceId,
       name: input.name,
       content: input.content,
@@ -533,7 +550,7 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
     const ts = this.now();
     const source = input.source ?? "manual";
     const skill: Skill = {
-      id: this.genId(),
+      id: input.id ?? this.genId(),
       workspaceId: input.workspaceId,
       name: input.name,
       description: input.description ?? null,

@@ -18,6 +18,13 @@
 export type HookEventName =
   | "PreToolUse"
   | "PostToolUse"
+  // Claude Code fires this INSTEAD of PostToolUse when a tool fails. Measured
+  // 2026-08-22: a Read of a missing file produces no PostToolUse at all, only a
+  // PostToolUseFailure carrying {error: string, is_interrupt: boolean, duration_ms}
+  // at the TOP level and no tool_response. Without this matcher registered the hook
+  // never observes a single tool failure, which is why tool_failure_codes stayed
+  // empty for the whole life of the friction pipe.
+  | "PostToolUseFailure"
   | "UserPromptSubmit"
   | "SessionStart"
   | "SessionEnd"

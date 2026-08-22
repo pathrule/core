@@ -17,7 +17,10 @@
  */
 import type { Memory, Rule, Skill } from "@pathrule/shared/content-types.js";
 import type { HookIndex } from "@pathrule/shared/hook-supervisor/types.js";
-import type { EmbeddingsPayload, Warehouse } from "./inputs.js";
+import type { AffinityPayload, EmbeddingsPayload, Warehouse } from "./inputs.js";
+// Type-only: erased at compile time, so referencing the node:crypto-backed
+// hook-index module here adds no runtime dependency for browser consumers.
+import type { HookIndexInput } from "./hook-index.js";
 import type { CompiledKnowledgeNode, KnowledgeRenderMode } from "./knowledge-compiler.js";
 import type {
   ProjectMapSearchResult,
@@ -272,6 +275,18 @@ export interface KnowledgeBackend {
   buildWarehousePayload?(workspaceId: string): Promise<Warehouse | null>;
 
   /**
+   * The raw assembler input (memories/rules/skills with full bodies), for backends
+   * that cannot run the assemblers themselves.
+   *
+   * CloudBackend is the case this exists for: `assembleWarehouse` lives in
+   * hook-index.ts, which imports node:crypto, and CloudBackend ships into the
+   * renderer bundle — so it returns the DATA and the Node-only hook-index writer
+   * runs the assembler. A backend that implements `buildWarehousePayload` directly
+   * (LocalBackend, in-memory) does not need this.
+   */
+  buildHookInputPayload?(workspaceId: string): Promise<HookIndexInput>;
+
+  /**
    * Precomputed embedding vectors keyed by item id, persisted as
    * `embeddings.json` next to the warehouse so the hook can rank a routed path's
    * items against the prompt embedding offline. Optional — returns `null` when
@@ -280,6 +295,18 @@ export interface KnowledgeBackend {
    * network; cloud/other backends may omit it.
    */
   buildEmbeddingsPayload?(workspaceId: string): Promise<EmbeddingsPayload | null>;
+
+  /**
+   * Learned per-memory affinity weights, persisted as `affinity.json` so the hook can
+   * ORDER a routed path's candidates by proven usefulness as well as cosine similarity.
+   * Optional — `null` when the backend has no affinity model (the local edition), and the
+   * hook then ranks on similarity alone.
+   *
+   * It must never change WHETHER something is injected, only the order: the relevance
+   * floor stays on the raw similarity. Letting a proven memory cross that floor would
+   * grow the injected context, which is the opposite of the point.
+   */
+  buildAffinityPayload?(workspaceId: string): Promise<AffinityPayload | null>;
 
   /**
    * Native Knowledge Compilation: per-directory markdown

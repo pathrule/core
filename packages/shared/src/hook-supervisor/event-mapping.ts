@@ -12,6 +12,9 @@ export type CursorHookEventName =
 export const CLAUDE_TO_CURSOR_EVENT_MAP: Record<HookEventName, CursorHookEventName | null> = {
   PreToolUse: "preToolUse",
   PostToolUse: "postToolUse",
+  // Claude Code only. Cursor / Codex / Copilot report tool failures inside their
+  // normal post-tool event, so there is nothing to map here.
+  PostToolUseFailure: null,
   UserPromptSubmit: "beforeSubmitPrompt",
   SessionStart: "sessionStart",
   SessionEnd: "sessionEnd",
@@ -57,6 +60,9 @@ export type CodexHookEventName =
 export const CLAUDE_TO_CODEX_EVENT_MAP: Record<HookEventName, CodexHookEventName | null> = {
   PreToolUse: "PreToolUse",
   PostToolUse: "PostToolUse",
+  // Claude Code only. Cursor / Codex / Copilot report tool failures inside their
+  // normal post-tool event, so there is nothing to map here.
+  PostToolUseFailure: null,
   UserPromptSubmit: "UserPromptSubmit",
   SessionStart: "SessionStart",
   SessionEnd: null,
@@ -104,6 +110,9 @@ export type CopilotHookEventName =
 export const CLAUDE_TO_COPILOT_EVENT_MAP: Record<HookEventName, CopilotHookEventName | null> = {
   PreToolUse: "preToolUse",
   PostToolUse: "postToolUse",
+  // Claude Code only. Cursor / Codex / Copilot report tool failures inside their
+  // normal post-tool event, so there is nothing to map here.
+  PostToolUseFailure: null,
   UserPromptSubmit: null,
   SessionStart: "sessionStart",
   SessionEnd: "sessionEnd",

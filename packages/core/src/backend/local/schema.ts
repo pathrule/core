@@ -9,7 +9,7 @@
  * schema; future schema changes append `{ version: N, sql }` deltas — never
  * edit a released migration. `SCHEMA_VERSION` is the latest version a fresh DB ends up at.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -166,6 +166,20 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memory_embeddings_ws ON memory_embeddings(workspace_id);
+
+-- Extra local checkouts (git worktrees) that resolve to this workspace.
+-- The workspaces.local_root_path column stays the ONE canonical clone; these are
+-- additional working directories of the same repo, where an isolated session runs.
+-- Without them a session in a worktree resolves to no workspace at all and loses
+-- every memory, rule and skill. Keyed by PATH: one workspace can have many
+-- worktrees, and a directory belongs to exactly one workspace.
+CREATE TABLE IF NOT EXISTS workspace_worktree_paths (
+  local_root_path TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  branch TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worktree_paths_ws ON workspace_worktree_paths(workspace_id);
 `;
 
 // Delta applied to DBs already at v1 (the table is in SCHEMA_SQL for fresh DBs).
@@ -206,8 +220,22 @@ CREATE INDEX IF NOT EXISTS idx_memory_embeddings_ws ON memory_embeddings(workspa
  * DB created by the pre-migration-runner bootstrap. Add new versions as deltas; never mutate
  * an existing entry.
  */
+// Worktree bindings for stores already at v3 (the table is in SCHEMA_SQL for
+// fresh DBs). Additive: nothing existing changes, and a store that never sees an
+// isolated session simply keeps an empty table.
+const MIGRATION_V4_WORKTREE_PATHS = `
+CREATE TABLE IF NOT EXISTS workspace_worktree_paths (
+  local_root_path TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  branch TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worktree_paths_ws ON workspace_worktree_paths(workspace_id);
+`;
+
 export const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
   { version: 1, sql: SCHEMA_SQL },
   { version: 2, sql: MIGRATION_V2_EMBEDDINGS },
   { version: 3, sql: MIGRATION_V3_EMBEDDINGS_BLOB },
+  { version: 4, sql: MIGRATION_V4_WORKTREE_PATHS },
 ];

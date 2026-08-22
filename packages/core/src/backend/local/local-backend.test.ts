@@ -48,6 +48,53 @@ describe("LocalBackend workspace resolution", () => {
     expect(m?.relativePath).toBe("/src");
   });
 
+  // An isolated agent session runs in a git worktree, a checkout OUTSIDE the
+  // canonical clone. Without a binding it resolves to no workspace and silently
+  // loses every memory, rule and skill.
+  it("resolves a cwd inside a registered worktree to its workspace", async () => {
+    const b = new LocalBackend(":memory:");
+    b.registerWorkspace({ workspaceId: "ws-1", localRootPath: "/Users/me/repo" });
+    b.registerWorktreePath({
+      workspaceId: "ws-1",
+      localRootPath: "/Users/me/Pathrule/worktrees/repo/fix-badge-a1b2c3d4",
+      branch: "fix-badge",
+    });
+    expect(
+      await b.resolveWorkspaceFromCwd("/Users/me/Pathrule/worktrees/repo/fix-badge-a1b2c3d4/src"),
+    ).toEqual({
+      workspaceId: "ws-1",
+      localRootPath: "/Users/me/Pathrule/worktrees/repo/fix-badge-a1b2c3d4",
+      relativePath: "/src",
+    });
+    expect(b.listWorktreePaths()).toEqual([
+      {
+        workspaceId: "ws-1",
+        localRootPath: "/Users/me/Pathrule/worktrees/repo/fix-badge-a1b2c3d4",
+        branch: "fix-badge",
+      },
+    ]);
+  });
+
+  it("keeps the longest root winning when a nested clone sits inside a worktree", async () => {
+    const b = new LocalBackend(":memory:");
+    b.registerWorkspace({ workspaceId: "nested", localRootPath: "/wt/repo/packages/api" });
+    b.registerWorktreePath({ workspaceId: "outer", localRootPath: "/wt/repo" });
+    expect((await b.resolveWorkspaceFromCwd("/wt/repo/packages/api/src"))?.workspaceId).toBe(
+      "nested",
+    );
+    expect((await b.resolveWorkspaceFromCwd("/wt/repo/docs"))?.workspaceId).toBe("outer");
+  });
+
+  it("stops resolving a worktree once its binding is removed", async () => {
+    const b = new LocalBackend(":memory:");
+    b.registerWorkspace({ workspaceId: "ws-1", localRootPath: "/Users/me/repo" });
+    b.registerWorktreePath({ workspaceId: "ws-1", localRootPath: "/Users/me/wt/gone" });
+    expect(await b.resolveWorkspaceFromCwd("/Users/me/wt/gone")).not.toBeNull();
+    b.unregisterWorktreePath("/Users/me/wt/gone");
+    expect(await b.resolveWorkspaceFromCwd("/Users/me/wt/gone")).toBeNull();
+    expect(b.listWorktreePaths()).toEqual([]);
+  });
+
   it("canonicalizes symlinked roots so init (one form) and resolve (another) agree", async () => {
     // Real symlinked dirs: register via the symlink path, resolve via a path under it.
     // Without realpath canonicalization the two forms wouldn't prefix-match.

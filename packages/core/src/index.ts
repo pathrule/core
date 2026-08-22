@@ -90,3 +90,14 @@ export {
   type RecoveryPlan,
   type ScannedFile,
 } from "./paths/recovery.js";
+
+// Navigation ROI — the hook writes navigation.jsonl on every routed prompt, and until
+// 2026-08-22 nothing but its own test read it. Exported here because the MCP server now
+// summarizes it at the activity-log boundary and ships the numbers to the Summary
+// surface: a routing engine with no measured accuracy cannot be tuned, only guessed at.
+export {
+  parseNavigationLines,
+  summarizeNavigationRoi,
+  type NavigationEvent,
+  type NavigationRoiSummary,
+} from "./backend/navigation-roi.js";

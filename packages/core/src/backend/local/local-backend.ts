@@ -10,7 +10,14 @@
  * better-sqlite3 is synchronous; methods wrap results in Promise to satisfy the async contract.
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, existsSync, realpathSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  existsSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 
@@ -237,6 +244,12 @@ interface SkillRow {
   content_fetched_at: string | null;
 }
 
+/**
+ * Sidecar file marking a store as a mirror of a hosted workspace rather than a workspace of
+ * its own. See LocalBackend.markAsMirror for why the distinction is load-bearing.
+ */
+const MIRROR_MARKER = ".mirror";
+
 export class LocalBackend implements KnowledgeBackend {
   private readonly db: Db;
   private readonly genId: () => string;
@@ -284,6 +297,35 @@ export class LocalBackend implements KnowledgeBackend {
   }
 
   /**
+   * Mark a store as a MIRROR of a hosted workspace rather than a workspace in its own
+   * right.
+   *
+   * Both kinds of store look identical on disk: same path shape, same schema, a
+   * `local_root_path` pointing at the same folder. But they mean opposite things. A
+   * workspace store is the authority for its content; a mirror is a local copy of an
+   * authority that lives elsewhere, and treating one as the other silently swaps which
+   * copy of a user's knowledge is in charge.
+   *
+   * The marker is a FILE, because the question is asked at launch by a process that has
+   * opened nothing yet, and an in-memory flag would be gone exactly then.
+   */
+  static markAsMirror(workspaceId: string, env: NodeJS.ProcessEnv = process.env): void {
+    const dir = join(pathruleHome(env), workspaceId);
+    try {
+      mkdirSync(dir, { recursive: true, mode: PATHRULE_DIR_MODE });
+      writeFileSync(join(dir, MIRROR_MARKER), "", { mode: PATHRULE_FILE_MODE });
+    } catch {
+      // Best-effort. A missing marker degrades to the previous behaviour (the store looks
+      // like a workspace), so it must not fail the write that triggered it.
+    }
+  }
+
+  /** True if this store is a mirror of a hosted workspace. */
+  static isMirror(workspaceId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+    return existsSync(join(pathruleHome(env), workspaceId, MIRROR_MARKER));
+  }
+
+  /**
    * Discover which local workspace store serves a cwd, WITHOUT opening
    * a writable backend first. Scans `~/.pathrule/<id>/pathrule.db` (honoring
    * `PATHRULE_HOME`), reads each store's `workspaces.local_root_path` (read-only,
@@ -296,12 +338,13 @@ export class LocalBackend implements KnowledgeBackend {
   static discoverWorkspaceForCwd(
     cwd: string,
     env: NodeJS.ProcessEnv = process.env,
+    options: { includeMirrors?: boolean } = {},
   ): WorkspaceMatch | null {
     const home = pathruleHome(env);
     if (!existsSync(home)) return null;
     const normalizedCwd = canonicalizePath(cwd);
 
-    const candidates: Array<{ wid: string; root: string }> = [];
+    const candidates: Array<{ wid: string; root: string; mirror: boolean }> = [];
     let entries: string[];
     try {
       entries = readdirSync(home);
@@ -311,6 +354,13 @@ export class LocalBackend implements KnowledgeBackend {
     for (const id of entries) {
       const dbPath = join(home, id, "pathrule.db");
       if (!existsSync(dbPath)) continue;
+      // A mirror is a local COPY of a hosted workspace, not a workspace. Offering it here
+      // makes a caller that asks "is this folder a local workspace?" answer yes for a
+      // folder whose authority is the cloud, and then serve a partial copy as the truth.
+      // Callers that want the mirror (the offline write path resolving a cwd through the
+      // mirror's own registry) ask for it explicitly.
+      const mirror = existsSync(join(home, id, MIRROR_MARKER));
+      if (mirror && !options.includeMirrors) continue;
       let db: Db | undefined;
       try {
         const nativeBinding = resolveSqliteNativeBinding();
@@ -320,7 +370,27 @@ export class LocalBackend implements KnowledgeBackend {
             "SELECT id, local_root_path FROM workspaces WHERE local_root_path IS NOT NULL LIMIT 1",
           )
           .get() as { id: string; local_root_path: string } | undefined;
-        if (row) candidates.push({ wid: row.id, root: normalizePathTail(row.local_root_path) });
+        if (row) {
+          candidates.push({ wid: row.id, root: normalizePathTail(row.local_root_path), mirror });
+        }
+        // An isolated session's cwd is a git worktree, which is NOT under the
+        // canonical clone, so discovery has to consider the worktree bindings too.
+        // Wrapped separately: a store written before schema v4 has no such table, and
+        // that must skip the extra roots rather than skip the whole store.
+        try {
+          const worktreeRows = db
+            .prepare("SELECT workspace_id, local_root_path FROM workspace_worktree_paths")
+            .all() as Array<{ workspace_id: string; local_root_path: string }>;
+          for (const wt of worktreeRows) {
+            candidates.push({
+              wid: wt.workspace_id,
+              root: normalizePathTail(wt.local_root_path),
+              mirror,
+            });
+          }
+        } catch {
+          // Pre-v4 store: no worktree bindings to contribute.
+        }
       } catch {
         // Skip an unreadable / pre-schema store rather than failing discovery.
       } finally {
@@ -330,7 +400,10 @@ export class LocalBackend implements KnowledgeBackend {
 
     const best = candidates
       .filter((c) => pathsEqual(normalizedCwd, c.root) || pathStartsWith(normalizedCwd, c.root))
-      .sort((a, b) => b.root.length - a.root.length)[0];
+      // Longest root wins (the most specific workspace). A real workspace beats a mirror of
+      // the same folder: the workspace is the user's own authority, the mirror is a copy of
+      // one that lives elsewhere. Only reachable with includeMirrors.
+      .sort((a, b) => b.root.length - a.root.length || Number(a.mirror) - Number(b.mirror))[0];
     if (!best) return null;
     return {
       workspaceId: best.wid,
@@ -400,13 +473,74 @@ export class LocalBackend implements KnowledgeBackend {
     return row?.name ?? null;
   }
 
+  /**
+   * Register an extra local checkout (a git worktree) that resolves to a
+   * workspace. `registerWorkspace` above owns the ONE canonical clone; an isolated
+   * agent session runs in another directory entirely, and without a row here it
+   * resolves to no workspace and loses all of its path-scoped knowledge.
+   * Local-only seam, like registerWorkspace: the hosted edition writes the
+   * equivalent row over Supabase.
+   */
+  registerWorktreePath(input: {
+    workspaceId: string;
+    localRootPath: string;
+    branch?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO workspace_worktree_paths (local_root_path, workspace_id, branch, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(local_root_path) DO UPDATE SET
+           workspace_id = excluded.workspace_id,
+           branch = COALESCE(excluded.branch, workspace_worktree_paths.branch)`,
+      )
+      .run(
+        canonicalizePath(input.localRootPath),
+        input.workspaceId,
+        input.branch ?? null,
+        this.now(),
+      );
+  }
+
+  /** Forget a worktree binding (the checkout was removed). */
+  unregisterWorktreePath(localRootPath: string): void {
+    this.db
+      .prepare("DELETE FROM workspace_worktree_paths WHERE local_root_path = ?")
+      .run(canonicalizePath(localRootPath));
+  }
+
+  /** The worktree bindings known to this store. */
+  listWorktreePaths(): Array<{ workspaceId: string; localRootPath: string; branch: string | null }> {
+    const rows = this.db
+      .prepare(
+        "SELECT local_root_path, workspace_id, branch FROM workspace_worktree_paths ORDER BY created_at DESC",
+      )
+      .all() as Array<{ local_root_path: string; workspace_id: string; branch: string | null }>;
+    return rows.map((r) => ({
+      workspaceId: r.workspace_id,
+      localRootPath: r.local_root_path,
+      branch: r.branch,
+    }));
+  }
+
   resolveWorkspaceFromCwd(cwd: string): Promise<WorkspaceMatch | null> {
     const normalizedCwd = canonicalizePath(cwd);
     const rows = this.db
       .prepare("SELECT id, local_root_path FROM workspaces WHERE local_root_path IS NOT NULL")
       .all() as Array<{ id: string; local_root_path: string }>;
-    const best = rows
-      .map((r) => ({ wid: r.id, root: normalizePathTail(r.local_root_path) }))
+    // Worktree roots are candidates too, and they compete under the SAME
+    // longest-prefix rule: a canonical root deeper than a worktree root still wins,
+    // so a nested workspace is never shadowed by an outer worktree.
+    const worktreeRows = this.db
+      .prepare("SELECT workspace_id, local_root_path FROM workspace_worktree_paths")
+      .all() as Array<{ workspace_id: string; local_root_path: string }>;
+    const best = [
+      ...rows.map((r) => ({ wid: r.id, root: normalizePathTail(r.local_root_path) })),
+      ...worktreeRows.map((r) => ({
+        wid: r.workspace_id,
+        root: normalizePathTail(r.local_root_path),
+      })),
+    ]
       .filter((r) => pathsEqual(normalizedCwd, r.root) || pathStartsWith(normalizedCwd, r.root))
       .sort((a, b) => b.root.length - a.root.length)[0];
     if (!best) return Promise.resolve(null);
@@ -511,7 +645,9 @@ export class LocalBackend implements KnowledgeBackend {
   async writeMemory(input: WriteMemoryInput): Promise<Memory> {
     const ts = this.now();
     const row: MemoryRow = {
-      id: this.genId(),
+      // A client-supplied id keeps the local mirror row and its eventual cloud row the
+      // SAME record; without it a queued write becomes two.
+      id: input.id ?? this.genId(),
       workspace_id: input.workspaceId,
       node_id: input.nodeId ?? "",
       title: input.title,
@@ -530,7 +666,21 @@ export class LocalBackend implements KnowledgeBackend {
         `INSERT INTO memories (id, workspace_id, node_id, title, content, source, version_id,
           version_number, created_by, last_edited_by, last_edited_at, created_at, updated_at)
          VALUES (@id, @workspace_id, @node_id, @title, @content, @source, @version_id,
-          @version_number, @created_by, @last_edited_by, @last_edited_at, @created_at, @updated_at)`,
+          @version_number, @created_by, @last_edited_by, @last_edited_at, @created_at, @updated_at)
+         -- A caller-supplied id promises an IDEMPOTENT write, and that promise has to hold
+         -- here too: re-writing the same record (a queued write replayed, an author saving
+         -- twice) must land the newer body instead of failing on the unique index. A
+         -- generated id can never conflict, so this only ever fires for a supplied one.
+         ON CONFLICT(id) DO UPDATE SET
+           node_id = excluded.node_id,
+           title = excluded.title,
+           content = excluded.content,
+           source = excluded.source,
+           version_id = excluded.version_id,
+           version_number = memories.version_number + 1,
+           last_edited_by = excluded.last_edited_by,
+           last_edited_at = excluded.last_edited_at,
+           updated_at = excluded.updated_at`,
       )
       .run(row);
     await this.embedAndStore(row.id, row.workspace_id, row.title, row.content);
@@ -708,7 +858,9 @@ export class LocalBackend implements KnowledgeBackend {
   writeRule(input: WriteRuleInput): Promise<Rule> {
     const ts = this.now();
     const row: RuleRow = {
-      id: this.genId(),
+      // A client-supplied id keeps the local mirror row and its eventual cloud row the
+      // SAME record; without it a queued write becomes two.
+      id: input.id ?? this.genId(),
       workspace_id: input.workspaceId,
       name: input.name,
       content: input.content,
@@ -831,7 +983,7 @@ export class LocalBackend implements KnowledgeBackend {
     const ts = this.now();
     const source = input.source ?? "manual";
     const row: SkillRow = {
-      id: this.genId(),
+      id: input.id ?? this.genId(),
       workspace_id: input.workspaceId,
       name: input.name,
       description: input.description ?? null,

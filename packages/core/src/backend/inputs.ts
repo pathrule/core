@@ -35,9 +35,33 @@ export type Warehouse = Record<string, WarehouseEntry>;
  */
 export type EmbeddingsPayload = Record<string, number[]>;
 
+/**
+ * Learned affinity weight per memory id, 0..1, persisted as `affinity.json` next to
+ * embeddings.json so the HOOK can use it.
+ *
+ * Why it exists: the affinity model was read in exactly one place — the MCP server's
+ * semantic-candidate ranker — while the hook, which delivers most of Pathrule's
+ * knowledge, never saw it (measured 2026-08-22: the string "affinity" does not appear in
+ * pathrule-hook.js). So the loop could close and still change nothing about what the
+ * agent gets shown.
+ *
+ * The value is the MAX decayed weight across that memory's intent clusters: "this memory
+ * has proven useful for at least one kind of ask". Cluster-aware weighting would be more
+ * precise and needs the centroids on disk; that is a separate step, deliberately not
+ * bundled with this one so the ranking change can be measured on its own.
+ */
+export type AffinityPayload = Record<string, number>;
+
 // ── Memory ────────────────────────────────────────────────────────────────
 export interface WriteMemoryInput {
   workspaceId: string;
+  /**
+   * Client-owned row id. Supplying it makes the write IDEMPOTENT, which is what lets a
+   * write be queued while a remote store is unreachable: the record needs an identity
+   * BEFORE the store sees it, so the local copy and the eventual remote row are the same
+   * record rather than two. Omit it and the backend mints one.
+   */
+  id?: string;
   nodeId?: string;
   title: string;
   content: string;
@@ -84,6 +108,13 @@ export type RestoreContentResult =
 // ── Rule ──────────────────────────────────────────────────────────────────
 export interface WriteRuleInput {
   workspaceId: string;
+  /**
+   * Client-owned row id. Supplying it makes the write IDEMPOTENT, which is what lets a
+   * write be queued while a remote store is unreachable: the record needs an identity
+   * BEFORE the store sees it, so the local copy and the eventual remote row are the same
+   * record rather than two. Omit it and the backend mints one.
+   */
+  id?: string;
   nodeId?: string;
   name: string;
   content: string;
@@ -110,6 +141,13 @@ export interface ListRulesQuery {
 // ── Skill ─────────────────────────────────────────────────────────────────
 export interface WriteSkillInput {
   workspaceId: string;
+  /**
+   * Client-owned row id. Supplying it makes the write IDEMPOTENT, which is what lets a
+   * write be queued while a remote store is unreachable: the record needs an identity
+   * BEFORE the store sees it, so the local copy and the eventual remote row are the same
+   * record rather than two. Omit it and the backend mints one.
+   */
+  id?: string;
   nodeId?: string;
   name: string;
   content: string;

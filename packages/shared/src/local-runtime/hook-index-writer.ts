@@ -8,7 +8,10 @@
 // Backend-agnostic by construction (takes KnowledgeBackend), so the hosted path is
 // unchanged — it's the same assembly used in either edition.
 
-import type { EmbeddingsPayload, KnowledgeBackend, Warehouse } from "@pathrule/core";
+import type { AffinityPayload, EmbeddingsPayload, KnowledgeBackend, Warehouse } from "@pathrule/core";
+// Value import, and safe here: this module is Node-only (it writes files), so
+// pulling in the node:crypto-backed assembler cannot reach a browser bundle.
+import { assembleWarehouse } from "@pathrule/core/backend/hook-index.js";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { localRuntimePaths } from "./paths.js";
@@ -112,13 +115,23 @@ export async function syncHookIndex(args: {
   // Persist the full-body warehouse next to the index. Best-effort — the
   // index write already succeeded, and warehouse is an optimization the hook
   // reads selectively by id for delta delivery.
-  if (typeof args.backend.buildWarehousePayload === "function") {
-    try {
-      const warehouse = await args.backend.buildWarehousePayload(args.workspaceId);
-      if (warehouse) await writeWarehouse(args.env, args.workspaceId, warehouse);
-    } catch {
-      /* warehouse is non-fatal */
+  //
+  // Two producers, because not every backend can run the assembler. LocalBackend and
+  // in-memory implement buildWarehousePayload directly; CloudBackend cannot (the
+  // assembler imports node:crypto and CloudBackend reaches the renderer bundle), so it
+  // returns the raw input via buildHookInputPayload and we assemble here — this module
+  // is Node-only. Before this existed, cloud simply wrote no warehouse and the hook's
+  // loadWarehouse returned {}, quietly degrading body delta delivery to previews.
+  try {
+    let warehouse: Warehouse | null = null;
+    if (typeof args.backend.buildWarehousePayload === "function") {
+      warehouse = await args.backend.buildWarehousePayload(args.workspaceId);
+    } else if (typeof args.backend.buildHookInputPayload === "function") {
+      warehouse = assembleWarehouse(await args.backend.buildHookInputPayload(args.workspaceId));
     }
+    if (warehouse) await writeWarehouse(args.env, args.workspaceId, warehouse);
+  } catch {
+    /* warehouse is non-fatal */
   }
 
   // Persist precomputed embedding vectors next to the warehouse. Best-effort
@@ -129,6 +142,18 @@ export async function syncHookIndex(args: {
       if (embeddings) await writeEmbeddings(args.env, args.workspaceId, embeddings);
     } catch {
       /* embeddings are a ranking optimization, never load-bearing */
+    }
+  }
+
+  // Learned affinity weights, same discipline as embeddings: a ranking optimization the
+  // hook can live without. Written separately from embeddings.json so a workspace with
+  // vectors but no affinity history (or the reverse) still gets what it has.
+  if (typeof args.backend.buildAffinityPayload === "function") {
+    try {
+      const affinity = await args.backend.buildAffinityPayload(args.workspaceId);
+      if (affinity) await writeAffinity(args.env, args.workspaceId, affinity);
+    } catch {
+      /* affinity only reorders candidates; never load-bearing */
     }
   }
 
@@ -170,6 +195,23 @@ async function writeEmbeddings(
   await mkdir(join(localRuntimePaths(env).home, "cache", workspaceId), { recursive: true });
   const tmp = `${target}.tmp`;
   await writeFile(tmp, JSON.stringify(embeddings), "utf8");
+  await chmod(tmp, 0o600);
+  await rename(tmp, target);
+}
+
+function affinityPath(env: NodeJS.ProcessEnv, workspaceId: string): string {
+  return join(localRuntimePaths(env).home, "cache", workspaceId, "affinity.json");
+}
+
+async function writeAffinity(
+  env: NodeJS.ProcessEnv,
+  workspaceId: string,
+  affinity: AffinityPayload,
+): Promise<void> {
+  const target = affinityPath(env, workspaceId);
+  await mkdir(join(localRuntimePaths(env).home, "cache", workspaceId), { recursive: true });
+  const tmp = `${target}.tmp`;
+  await writeFile(tmp, JSON.stringify(affinity), "utf8");
   await chmod(tmp, 0o600);
   await rename(tmp, target);
 }

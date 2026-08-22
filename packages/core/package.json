@@ -11,6 +11,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./backend/knowledge-compiler.js": "./src/backend/knowledge-compiler.ts",
+    "./backend/hook-index.js": "./src/backend/hook-index.ts",
     "./paths/*.js": "./src/paths/*.ts"
   },
   "scripts": {
