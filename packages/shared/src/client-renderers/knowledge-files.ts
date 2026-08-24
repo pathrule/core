@@ -16,6 +16,7 @@
 
 import { isDirectoryLeafName } from "@pathrule/core/paths/leaf-type.js";
 import type { CompiledKnowledgeNode } from "@pathrule/core";
+import { renderTeamContextBlock } from "./team-context-block.js";
 import type { MultiClientInput, RenderedFile } from "./types.js";
 
 // Starts with the same "<!-- Pathrule managed" substring safe-write keys on,
@@ -59,6 +60,18 @@ export function appendRootKnowledgeSection(body: string, input: MultiClientInput
     root.markdown.trimEnd() +
     "\n"
   );
+}
+
+/**
+ * Append the team context block to a turn-zero file. Always LAST, after the
+ * knowledge section: the block changes when membership changes, and a cached
+ * prefix is invalid from the first changed byte onward, so keeping it at the
+ * end leaves the knowledge above it byte-identical.
+ */
+export function appendTeamContextSection(body: string, input: MultiClientInput): string {
+  const block = renderTeamContextBlock(input.teamContext);
+  if (!block) return body;
+  return `${body.trimEnd()}\n\n${block}`;
 }
 
 /** A standalone knowledge file body (banner + compiled markdown). */

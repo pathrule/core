@@ -35,6 +35,15 @@ export async function syncHookIndex(args: {
   workspaceRoot: string;
   env: NodeJS.ProcessEnv;
   refreshEpisodes?: boolean;
+  /**
+   * Cloud semantic endpoint to stamp into the index, so the hook can rank bodies
+   * over our own embedding infrastructure instead of falling back to keyword
+   * overlap. Pass it ONLY from a cloud-backed caller: absence is what keeps the
+   * local/OSS edition on its BYO-key path, and it is not read from `env` because
+   * the MCP server resolves these from build-time constants where process.env is
+   * empty (see mcp-server/src/env.ts).
+   */
+  cloud?: { url: string; anonKey: string };
 }): Promise<HookIndexSyncResult> {
   const target = hookIndexPath(args.env, args.workspaceId);
   let refreshedEpisodes = false;
@@ -79,6 +88,13 @@ export async function syncHookIndex(args: {
     ...data,
     workspace_root: args.workspaceRoot,
   };
+
+  // Only stamped when the caller is cloud-backed, and only when both halves are
+  // present: a half-written endpoint would make the hook spawn a request that
+  // cannot succeed, and its failure looks exactly like "no key" from the outside.
+  if (args.cloud?.url && args.cloud.anonKey) {
+    index.cloud_semantic = { url: args.cloud.url, anon_key: args.cloud.anonKey };
+  }
 
   // Native Knowledge Compilation: when the backend can compile knowledge into
   // native instruction files, mark the index so the hook stops carrying memory

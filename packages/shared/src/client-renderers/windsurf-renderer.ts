@@ -10,6 +10,7 @@ import { renderProtocolBody } from "./body.js";
 import { splicePromotedRulesSection } from "./promoted-rules-section.js";
 import {
   appendRootKnowledgeSection,
+  appendTeamContextSection,
   knowledgeOwnedPaths,
   renderKnowledgeFiles,
 } from "./knowledge-files.js";
@@ -34,6 +35,8 @@ function renderWindsurf(input: MultiClientInput): RenderedFile[] {
   }
   // Native Knowledge Compilation — root knowledge rides the auto-loaded rule.
   body = appendRootKnowledgeSection(body, input);
+  // Team context block last: keeps the cached prefix above it stable.
+  body = appendTeamContextSection(body, input);
 
   return [
     { path: MODERN_PATH, body },

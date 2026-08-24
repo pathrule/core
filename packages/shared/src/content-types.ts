@@ -101,7 +101,10 @@ export interface Comment {
   workspaceId: string;
   targetKind: CommentTargetKind;
   targetId: string;
-  authorId: string;
+  /** Null once the author's account is deleted. The comment survives the person:
+   *  a thread is a record of a conversation, and removing it would edit history
+   *  the rest of the team is still reading. */
+  authorId: string | null;
   body: string;
   lineStart: number | null;
   lineEnd: number | null;

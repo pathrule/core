@@ -12,15 +12,19 @@
 //      we want knowledge delivered through.
 
 import {
+  KNOWLEDGE_BANNER,
+  appendTeamContextSection,
   dirRelative,
   knowledgeFileBody,
   knowledgeOwnedPaths,
   renderKnowledgeFiles,
   rootKnowledge,
 } from "./knowledge-files.js";
+import { renderTeamContextBlock } from "./team-context-block.js";
 import type { ClientRendererSpec, MultiClientInput, RenderedFile } from "./types.js";
 
 const ROOT_KNOWLEDGE_PATH = ".claude/rules/pathrule-knowledge.md";
+const ROOT_KNOWLEDGE_TITLE = "# Workspace knowledge (Pathrule)";
 
 /** Claude's native path-scoped channel: the directory's own CLAUDE.md. */
 const knowledgePath = (dirPath: string, _slug: string): string =>
@@ -32,7 +36,16 @@ function renderClaudeKnowledge(input: MultiClientInput): RenderedFile[] {
   if (root) {
     files.push({
       path: ROOT_KNOWLEDGE_PATH,
-      body: knowledgeFileBody(root, "# Workspace knowledge (Pathrule)"),
+      // Team context rides the same turn-zero file, appended last so the
+      // knowledge above it stays byte-identical for the prompt cache.
+      body: appendTeamContextSection(knowledgeFileBody(root, ROOT_KNOWLEDGE_TITLE), input),
+    });
+  } else if (renderTeamContextBlock(input.teamContext)) {
+    // A workspace can have team context and no compiled root knowledge yet.
+    // The block still has to reach turn zero, so the file carries it alone.
+    files.push({
+      path: ROOT_KNOWLEDGE_PATH,
+      body: appendTeamContextSection(`${KNOWLEDGE_BANNER}\n${ROOT_KNOWLEDGE_TITLE}\n`, input),
     });
   }
   files.push(...renderKnowledgeFiles(input, knowledgePath));

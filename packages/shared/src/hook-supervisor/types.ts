@@ -290,6 +290,29 @@ export interface HookIndex {
    */
   hot_paths?: Array<{ path: string; count: number }>;
 
+  /**
+   * Cloud semantic endpoint for the hook's prompt-time body ranking.
+   *
+   * The hook ranks memory bodies against the prompt, and to do that it needs a
+   * query vector it cannot produce: it never touches the network, and
+   * embed-query.cjs requires the caller's OWN embedding key (the BYO path, which
+   * is the local/OSS edition's deal). Measured 2026-08-23: 56 of 56 body
+   * injections came back `fallback_no_key`, so on a cloud account the relevance
+   * floor was bypassed on every prompt.
+   *
+   * Present ONLY when a cloud-backed process wrote this index, which is exactly
+   * the edition boundary we want: cloud accounts get ranking over our own
+   * infrastructure (the `memory-embedding-indexer` edge function holds the
+   * provider key as a Supabase secret), and the local edition writes no block
+   * here and keeps its keyword-overlap path.
+   *
+   * `anon_key` is the publishable Supabase key, public by construction. The
+   * per-user bearer token is NOT stored here — the hook reads it from
+   * ~/.pathrule/credentials.json at call time so a stale index cannot carry a
+   * stale session.
+   */
+  cloud_semantic?: { url: string; anon_key: string };
+
   /** Populated when failures recur. */
   fail_patterns?: FailPatternStub[];
 

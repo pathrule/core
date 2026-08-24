@@ -13,6 +13,11 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { LocalBackend } from "@pathrule/core";
 import { syncHookIndex } from "@pathrule/shared/local-runtime/hook-index-writer.js";
+// Deep import, NOT the barrel. This file is inside the OSS export closure, and the
+// closure is the full import graph: one barrel import re-exports auth, billing,
+// cloud-connector and intelligence into it, which is 25 closure violations and a
+// failing `release:security-gates` for the sake of one function.
+import { errorMessage } from "@pathrule/shared/net/failure-class.js";
 
 export interface InitLocalResult {
   workspaceId: string;
@@ -55,8 +60,23 @@ export async function initLocalWorkspace(options: InitLocalOptions): Promise<Ini
   try {
     backend.registerWorkspace({ workspaceId, name, localRootPath: cwd });
     // Warm the offline hook-index so PreToolUse/UserPromptSubmit inject path context
-    // from the very first prompt (no daemon locally). Best-effort — init must not fail on it.
-    await syncHookIndex({ backend, workspaceId, workspaceRoot: cwd, env }).catch(() => {});
+    // from the very first prompt (no daemon locally). Best-effort — init must not fail on it,
+    // but it must not be SILENT either: syncHookIndex REPORTS failure via { ok: false, error }
+    // and only throws on a genuine disk error, so a bare .catch() left the most likely
+    // failure invisible and the first prompts uninjected with no trace.
+    await syncHookIndex({ backend, workspaceId, workspaceRoot: cwd, env })
+      .then((result) => {
+        if (!result.ok) {
+          process.stderr.write(
+            `[pathrule] hook-index warm-up reported failure: ${result.error ?? "no payload returned"}\n`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `[pathrule] hook-index warm-up threw: ${errorMessage(err, "unknown error")}\n`,
+        );
+      });
   } finally {
     backend.close();
   }

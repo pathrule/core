@@ -17,6 +17,7 @@ import { buildHookConfig, renderCopilotHooks } from "../hook-supervisor/client-c
 import { splicePromotedRulesSection } from "./promoted-rules-section.js";
 import {
   appendRootKnowledgeSection,
+  appendTeamContextSection,
   dirRelative,
   knowledgeOwnedPaths,
   renderKnowledgeFiles,
@@ -68,6 +69,8 @@ function renderCopilot(input: MultiClientInput): RenderedFile[] {
 
   // Native Knowledge Compilation — root knowledge rides the repo-wide file.
   body = appendRootKnowledgeSection(body, input);
+  // Team context block last: keeps the cached prefix above it stable.
+  body = appendTeamContextSection(body, input);
 
   const hooksBody = renderCopilotHooks(buildHookConfig());
   return [

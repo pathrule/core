@@ -16,6 +16,7 @@ import { buildHookConfig, renderCursorHooks } from "../hook-supervisor/client-co
 import { splicePromotedRulesSection } from "./promoted-rules-section.js";
 import {
   appendRootKnowledgeSection,
+  appendTeamContextSection,
   dirRelative,
   knowledgeOwnedPaths,
   renderKnowledgeFiles,
@@ -65,6 +66,8 @@ function renderCursor(input: MultiClientInput): RenderedFile[] {
   }
   // Native Knowledge Compilation — root knowledge rides the alwaysApply rule.
   body = appendRootKnowledgeSection(body, input);
+  // Team context block last: keeps the cached prefix above it stable.
+  body = appendTeamContextSection(body, input);
 
   const hooksBody = renderCursorHooks(buildHookConfig());
   return [

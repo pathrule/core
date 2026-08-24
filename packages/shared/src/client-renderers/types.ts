@@ -4,6 +4,7 @@
 
 import type { CompiledKnowledgeNode } from "@pathrule/core";
 import type { WorkspaceOverviewNode } from "../tools/tree.js";
+import type { TeamContextBlock } from "./team-context-block.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Promoted Rules Bundle
@@ -68,6 +69,14 @@ export interface MultiClientInput {
    * ⇒ slim clients fall back to `knowledge` (full).
    */
   knowledgeSlim?: CompiledKnowledgeNode[];
+  /**
+   * The single personalization block (who the user is, who the reference is for
+   * which area). Unlike the removed `rootContext` / `recentActivities`, a
+   * renderer DOES read this: it is appended to the turn-zero file, last, so the
+   * knowledge prefix above it stays byte-identical for the prompt cache.
+   * Undefined in the local edition, which has no organization.
+   */
+  teamContext?: TeamContextBlock;
 }
 
 export interface RenderedFile {

@@ -14,6 +14,7 @@
     "./client-renderers/disk-writer.js": "./src/client-renderers/disk-writer.ts",
     "./client-renderers/pipeline.js": "./src/client-renderers/pipeline.ts",
     "./client-renderers/safe-write.js": "./src/client-renderers/safe-write.ts",
+    "./net/failure-class.js": "./src/net/failure-class.ts",
     "./local-runtime/paths.js": "./src/local-runtime/paths.ts",
     "./local-runtime/hook-index-writer.js": "./src/local-runtime/hook-index-writer.ts",
     "./local-runtime/managed-file-ownership.js": "./src/local-runtime/managed-file-ownership.ts",

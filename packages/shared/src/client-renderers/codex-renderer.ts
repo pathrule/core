@@ -23,6 +23,7 @@ import { ensureCodexConfigToml } from "../pathrule-protocol.js";
 import { splicePromotedRulesSection } from "./promoted-rules-section.js";
 import {
   appendRootKnowledgeSection,
+  appendTeamContextSection,
   dirRelative,
   knowledgeOwnedPaths,
   renderKnowledgeFiles,
@@ -49,6 +50,8 @@ function renderCodex(input: MultiClientInput): RenderedFile[] {
   }
   // Native Knowledge Compilation — root knowledge rides the auto-loaded file.
   body = appendRootKnowledgeSection(body, input);
+  // Team context block last: keeps the cached prefix above it stable.
+  body = appendTeamContextSection(body, input);
 
   const hooksBody = renderCodexHooks(buildHookConfig());
   // First-write seed for config.toml; the merger in safe-write handles the
