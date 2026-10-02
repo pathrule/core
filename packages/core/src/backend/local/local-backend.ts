@@ -9,12 +9,26 @@
  *
  * better-sqlite3 is synchronous; methods wrap results in Promise to satisfy the async contract.
  */
+import type {
+  LearningClaim,
+  LearningClaimRevision,
+} from "@pathrule/shared/project-learning/claims.js";
+import type { LearningActivity } from "@pathrule/shared/intelligence/activity-learning.js";
+import { insertActivityRow, learningActivityRows } from "./activity-store.js";
+import {
+  listLearningClaimRows,
+  putLearningClaimRow,
+  retiredLearningClaimRows,
+  reviseLearningClaimRow,
+} from "./learning-store.js";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
   readdirSync,
   existsSync,
+  readFileSync,
+  renameSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
@@ -59,7 +73,7 @@ import { normalizeNodePath, guessLeafType } from "@pathrule/shared/tools/node-pa
 import { buildWorkspaceOverview } from "@pathrule/shared/tools/overview.js";
 import { runAiRouteAdapter, hasAiRouteKey } from "../ai-route-adapter.js";
 import type { BackendCapabilities } from "../capabilities.js";
-import type { KnowledgeBackend } from "../knowledge-backend.js";
+import type { LocalKnowledgeBackend } from "../knowledge-backend.js";
 import type {
   Activity,
   ActivityRecord,
@@ -89,8 +103,35 @@ import type {
   WriteSkillInput,
 } from "../inputs.js";
 import { MIGRATIONS } from "./schema.js";
+import { blobToVector, vectorToBlob } from "./vector-blob.js";
+import { localKnowledgeMapFingerprint, localKnowledgeMapInput } from "./knowledge-map-store.js";
+import { parseRuleAtoms } from "@pathrule/shared/knowledge/atoms.js";
 import {
-  normalizeActivitySubjects,
+  approveRemedy,
+  isRemedyDeliverable,
+  parseRemedyAtom,
+  rejectRemedy,
+  type RemedyAtom,
+} from "@pathrule/shared/knowledge/remedy.js";
+import { projectRemedyToAdvisory, projectSelectionToAdvisory, projectProcedureToAdvisory, projectContextToAdvisory, projectRationaleToAdvisory, type RemedyAdvisory, type SelectionAdvisory, type ProcedureAdvisory, type ContextAdvisory, type RationaleAdvisory } from "@pathrule/shared/agent-ir/agent-ir.js";
+import { parseSelectionAtom, approveSelection, rejectSelection, isSelectionDeliverable, type SelectionAtom } from "@pathrule/shared/knowledge/selection.js";
+import { parseProcedureAtom, approveProcedure, rejectProcedure, isProcedureDeliverable, type ProcedureAtom } from "@pathrule/shared/knowledge/procedure.js";
+import { parseContextAtom, approveContext, rejectContext, isContextDeliverable, type ContextAtom } from "@pathrule/shared/knowledge/context.js";
+import { parseRationaleAtom, approveRationale, rejectRationale, isRationaleDeliverable, type RationaleAtom } from "@pathrule/shared/knowledge/rationale.js";
+import { parsePrecedenceAtom, approvePrecedence, rejectPrecedence, isPrecedenceActive, type PrecedenceAtom } from "@pathrule/shared/knowledge/precedence.js";
+import { resolveConflicts, type ConflictCandidate, type PrecedenceEdge } from "@pathrule/shared/agent-ir/conflict.js";
+import { normalizeScope } from "@pathrule/shared/agent-ir/agent-ir.js";
+import {
+  attributeUsage,
+  classifyCommandOutcome,
+  classifyCheckOutcome,
+  classifyErrorPersistenceOutcome,
+  observeCondition,
+  type DeliveredAdvisory,
+  type ObservedEvent,
+  type UsageAttribution,
+} from "@pathrule/shared/agent-ir/outcome.js";
+import {
   localEntryToRefreshRow,
   localEntryToSummary,
   type LocalRefreshEntry,
@@ -100,13 +141,15 @@ import { rankProjectMap, type ProjectMapCandidate } from "../project-map-rank.js
 import { activityTouchedPaths, rankCoupledPaths } from "../co-change-rank.js";
 import { searchEpisodes, clusterEpisodes, type EpisodeActivity } from "../work-episodes.js";
 import { assembleBriefingLocal } from "../briefing.js";
-import { assembleHookIndex, assembleWarehouse, type HookIndexInput, type HookRuleInput } from "../hook-index.js";
+import { assembleHookIndex, assembleWarehouse, compiledDeliveryPlan, type HookIndexInput, type HookRuleInput } from "../hook-index.js";
+import type { CompiledMemoryDelivery } from "@pathrule/shared/agent-ir/compiled-delivery.js";
 import {
   assembleKnowledgeNodes,
   type CompiledKnowledgeNode,
   type KnowledgeRenderMode,
 } from "../knowledge-compiler.js";
 import type { EmbeddingsPayload, Warehouse } from "../inputs.js";
+import type { KnowledgeMapInput } from "../knowledge-map-input.js";
 import { resolveLocalPrincipal } from "./identity.js";
 import { embedTextBYO, hasEmbeddingKey, type EmbedFn } from "../embedding-adapter.js";
 import {
@@ -141,23 +184,6 @@ function canonicalizePath(p: string): string {
   } catch {
     return normalizePathTail(p);
   }
-}
-
-/** Pack an embedding vector into a float32 BLOB for the `memory_embeddings.embedding` column. */
-function vectorToBlob(vector: number[]): Buffer {
-  // new Float32Array(vector) owns a fresh, exactly-sized ArrayBuffer (offset 0).
-  return Buffer.from(new Float32Array(vector).buffer);
-}
-
-/**
- * Read a float32 BLOB back as a vector. Returns null when the byte length isn't a
- * whole number of float32s or doesn't match the row's declared `dims` (a truncated /
- * hand-corrupted store) so the caller can skip it instead of scoring garbage.
- */
-function blobToVector(blob: Buffer, dims: number): Float32Array | null {
-  if (blob.byteLength !== dims * 4) return null;
-  // View the exact bytes — a Node Buffer can be a slice of a larger pooled ArrayBuffer.
-  return new Float32Array(blob.buffer, blob.byteOffset, dims);
 }
 
 /** Safely parse a JSON text column into a string[] (empty on null/garbage). */
@@ -222,7 +248,8 @@ interface RuleRow {
   last_edited_by: string | null;
   last_edited_at: string;
   created_at: string;
-  updated_at: string;
+  updated_at: string;  /** JSON array of RuleConstraint, stored as TEXT. Parsed defensively on read. */
+  constraints: string;
 }
 interface SkillRow {
   id: string;
@@ -250,7 +277,7 @@ interface SkillRow {
  */
 const MIRROR_MARKER = ".mirror";
 
-export class LocalBackend implements KnowledgeBackend {
+export class LocalBackend implements LocalKnowledgeBackend {
   private readonly db: Db;
   private readonly genId: () => string;
   private readonly now: () => string;
@@ -831,6 +858,7 @@ export class LocalBackend implements KnowledgeBackend {
 
   // ── rule CRUD ──────────────────────────────────────────────────────────────
   private toRule(r: RuleRow): Rule {
+    const constraints = parseRuleAtoms(r.constraints);
     return {
       id: r.id,
       workspaceId: r.workspace_id,
@@ -845,6 +873,7 @@ export class LocalBackend implements KnowledgeBackend {
       lastEditedAt: r.last_edited_at,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      ...(constraints.length > 0 ? { constraints } : {}),
     };
   }
 
@@ -873,13 +902,16 @@ export class LocalBackend implements KnowledgeBackend {
       last_edited_at: ts,
       created_at: ts,
       updated_at: ts,
+      constraints: JSON.stringify(input.constraints ?? []),
     };
     this.db
       .prepare(
         `INSERT INTO rules (id, workspace_id, name, content, scope_type, priority, version_id,
-          version_number, created_by, last_edited_by, last_edited_at, created_at, updated_at)
+          version_number, created_by, last_edited_by, last_edited_at, created_at, updated_at,
+          constraints)
          VALUES (@id, @workspace_id, @name, @content, @scope_type, @priority, @version_id,
-          @version_number, @created_by, @last_edited_by, @last_edited_at, @created_at, @updated_at)`,
+          @version_number, @created_by, @last_edited_by, @last_edited_at, @created_at, @updated_at,
+          @constraints)`,
       )
       .run(row);
     if (input.nodeId) {
@@ -900,7 +932,8 @@ export class LocalBackend implements KnowledgeBackend {
     const nextVersionId = this.genId();
     const result = this.db
       .prepare(
-        `UPDATE rules SET name = ?, content = ?, scope_type = ?, priority = ?, version_id = ?,
+        `UPDATE rules SET name = ?, content = ?, scope_type = ?, priority = ?, constraints = ?,
+          version_id = ?,
           version_number = ?, last_edited_by = ?, last_edited_at = ?, updated_at = ?
           WHERE id = ? AND version_id = ?`,
       )
@@ -909,6 +942,7 @@ export class LocalBackend implements KnowledgeBackend {
         input.content ?? existing.content,
         input.scopeType ?? existing.scopeType,
         input.priority ?? existing.priority,
+        JSON.stringify(input.constraints ?? existing.constraints ?? []),
         nextVersionId,
         existing.versionNumber + 1,
         this.principal,
@@ -1866,7 +1900,8 @@ export class LocalBackend implements KnowledgeBackend {
 
     const ruleRows = this.db
       .prepare(
-        `SELECT id, name, content, scope_type, priority FROM rules WHERE workspace_id = ? AND status = 'active'`,
+        `SELECT id, name, content, scope_type, priority, constraints
+           FROM rules WHERE workspace_id = ? AND status = 'active'`,
       )
       .all(workspaceId) as Array<{
       id: string;
@@ -1874,6 +1909,7 @@ export class LocalBackend implements KnowledgeBackend {
       content: string;
       scope_type: string;
       priority: string;
+      constraints: string;
     }>;
     const ruleNodePaths = this.db
       .prepare(
@@ -1892,6 +1928,9 @@ export class LocalBackend implements KnowledgeBackend {
       ...r,
       node_paths: pathsByRule.get(r.id) ?? [],
       semantic_tags: null,
+      // Parsed here rather than passed as raw TEXT: the compiler takes atoms, and a
+      // string that happens to look like one is exactly how a deny gate goes wrong.
+      constraints: parseRuleAtoms(r.constraints),
     }));
 
     const skillNodePaths = this.db
@@ -1970,7 +2009,64 @@ export class LocalBackend implements KnowledgeBackend {
       workEpisodes,
       pendingRefreshCount,
       inProgressRefreshCount,
+      ...this.advisoryInputSync(workspaceId),
     };
+  }
+
+  /**
+   * The advisory half of the hook input: deliverable atoms projected for delivery, plus the memory
+   * each one was compiled from, which the completeness gate needs to judge it against.
+   */
+  private advisoryInputSync(workspaceId: string): Required<
+    Pick<HookIndexInput, "advisories" | "selections" | "procedures" | "contexts" | "rationales" | "advisorySources">
+  > {
+    const withheld = this.hookConflictWithheld(workspaceId);
+    const sources = this.db
+      .prepare(
+        `SELECT id, subject_id FROM knowledge_atoms
+          WHERE workspace_id = ? AND status = 'active' AND authority = 'human' AND subject_type = 'memory'`,
+      )
+      .all(workspaceId) as Array<{ id: string; subject_id: string }>;
+    return {
+      // V33: a conflicting atom with no applicable approved precedence is withheld from the hook, the
+      // same safe default the Agent IR compiler applies. contexts/rationales never auto-conflict.
+      advisories: this.advisoriesForHookIndex(workspaceId).filter((a) => !withheld.has(a.ref)),
+      selections: this.selectionsForHookIndex(workspaceId).filter((a) => !withheld.has(a.ref)),
+      procedures: this.proceduresForHookIndex(workspaceId).filter((a) => !withheld.has(a.ref)),
+      contexts: this.contextsForHookIndex(workspaceId),
+      rationales: this.rationalesForHookIndex(workspaceId),
+      advisorySources: Object.fromEntries(sources.map((r) => [r.id, r.subject_id])),
+    };
+  }
+
+  /**
+   * The memories delivered as their compiled form, keyed by memory id: the same plan the hook index,
+   * the warehouse and the native knowledge files are built from, for a surface that delivers memory
+   * bodies itself (Studio's turn context). A memory absent from the result is delivered as written.
+   *
+   * `memories` is the text that surface is about to deliver. Pass it whenever this store may not hold
+   * the current text (a cloud workspace whose atoms live in this local store): the gate must judge the
+   * lines against what would otherwise reach the agent, never against an older copy. Without it, the
+   * store's own active memories are the source.
+   */
+  compiledMemoryDeliveries(
+    workspaceId: string,
+    memories?: ReadonlyArray<{ id: string; content: string }>,
+  ): Promise<Record<string, CompiledMemoryDelivery>> {
+    const advisory = this.advisoryInputSync(workspaceId);
+    const sourceIds = [...new Set(Object.values(advisory.advisorySources))];
+    if (sourceIds.length === 0) return Promise.resolve({});
+    if (memories) {
+      return Promise.resolve(Object.fromEntries(compiledDeliveryPlan({ ...advisory, memories }).compiled));
+    }
+    const stored = this.db
+      .prepare(
+        `SELECT m.id, m.title, m.content, n.relative_path AS node_path
+           FROM memories m JOIN nodes n ON n.id = m.node_id
+          WHERE m.workspace_id = ? AND m.status = 'active' AND m.id IN (${sourceIds.map(() => "?").join(", ")})`,
+      )
+      .all(workspaceId, ...sourceIds) as HookIndexInput["memories"];
+    return Promise.resolve(Object.fromEntries(compiledDeliveryPlan({ ...advisory, memories: stored }).compiled));
   }
 
   buildHookIndexPayload(workspaceId: string): Promise<HookIndex | null> {
@@ -1980,6 +2076,14 @@ export class LocalBackend implements KnowledgeBackend {
   // The full-body warehouse, assembled from the same SQLite source.
   buildWarehousePayload(workspaceId: string): Promise<Warehouse | null> {
     return Promise.resolve(assembleWarehouse(this.collectHookInput(workspaceId)));
+  }
+
+  // The knowledge map input and its cache key (knowledge-map-store.ts).
+  async buildKnowledgeMapInput(workspaceId: string): Promise<KnowledgeMapInput | null> {
+    return localKnowledgeMapInput(this.db, workspaceId);
+  }
+  async knowledgeMapFingerprint(workspaceId: string): Promise<string | null> {
+    return localKnowledgeMapFingerprint(this.db, workspaceId);
   }
 
   // Project the on-write embedding store into a memory-id→vector payload.
@@ -2111,47 +2215,28 @@ export class LocalBackend implements KnowledgeBackend {
 
   // ── activity ───────────────────────────────────────────────────────────────────
   logActivity(input: LogActivityInput): Promise<ActivityRecord> {
-    const id = this.genId();
-    const createdAt = this.now();
-    const subjects = normalizeActivitySubjects(input.subjects);
-    const nodePath = input.nodePath || "/";
-    const filesTouched = input.filesTouched ?? { total: 0, by_area: {} };
-    const aiClient = input.aiClient ?? "claude-code";
-    // Friction counts + applied-memory signals are not stored locally.
-    this.db
-      .prepare(
-        `INSERT INTO activity_logs (id, workspace_id, node_path, domain, action, scope, subjects,
-          task_summary, files_touched, ai_client, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        id,
-        input.workspaceId,
-        nodePath,
-        input.domain,
-        input.action,
-        input.scope,
-        JSON.stringify(subjects),
-        input.taskSummary,
-        JSON.stringify(filesTouched),
-        aiClient,
-        createdAt,
-      );
-    return Promise.resolve({
-      id,
-      workspaceId: input.workspaceId,
-      nodePath,
-      domain: input.domain,
-      action: input.action,
-      scope: input.scope,
-      subjects,
-      taskSummary: input.taskSummary,
-      filesTouched,
-      aiClient,
-      detailLevel: "standard",
-      status: "active",
-      createdAt,
-    });
+    return Promise.resolve(insertActivityRow(this.db, input, this.genId(), this.now()));
+  }
+
+  // Learning claims and learning activity evidence (learning-store.ts, activity-store.ts).
+  putLearningClaim(input: LearningClaim): Promise<LearningClaim> {
+    return putLearningClaimRow(this.db, input);
+  }
+
+  retiredLearningClaimIds(workspaceId: string, ids: string[]): Promise<string[]> {
+    return retiredLearningClaimRows(this.db, workspaceId, ids);
+  }
+
+  reviseLearningClaim(raw: LearningClaimRevision): Promise<{ status: "applied"; id: string }> {
+    return reviseLearningClaimRow(this.db, raw);
+  }
+
+  listLearningClaims(workspaceId: string, limit = 100): Promise<LearningClaim[]> {
+    return listLearningClaimRows(this.db, workspaceId, limit);
+  }
+
+  learningActivities(workspaceId: string, limit = 200): Promise<LearningActivity[]> {
+    return Promise.resolve(learningActivityRows(this.db, workspaceId, limit));
   }
 
   recentActivities(scope: ContextScope, limit: number): Promise<Activity[]> {
@@ -2260,6 +2345,686 @@ export class LocalBackend implements KnowledgeBackend {
           .get(subjectId) as { relative_path?: string } | undefined
       )?.relative_path ?? "/";
     return { title: r?.name ?? "(unknown)", body: r?.content ?? "", nodePath };
+  }
+
+  // ── typed knowledge atoms (docs/adr/0001-remedy-atom-persistence.md) ──
+
+  /** Reconstruct an atom from its row. The payload is the whole atom, so the columns are an index. */
+  private rowToRemedyAtom(row: Record<string, unknown>): RemedyAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown;
+    try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parseRemedyAtom(parsed);
+    if (!atom) return null;
+    // The columns are authoritative for lifecycle: a decision updates them, and a stale payload
+    // must never resurrect a status the user already changed.
+    const status = row["status"];
+    const authority = row["authority"];
+    return {
+      ...atom,
+      status: status === "active" || status === "rejected" ? status : "proposed",
+      authority: authority === "human" ? "human" : "inferred",
+      approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null,
+    };
+  }
+
+  proposeRemedyAtom(workspaceId: string, atom: RemedyAtom): Promise<RemedyAtom> {
+    const existing = this.db
+      .prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?")
+      .get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    // Idempotent, and deliberately so: the same evidence is the same atom, and an atom the user
+    // already decided on must not be reset to pending by another analysis run.
+    if (existing) {
+      const back = this.rowToRemedyAtom(existing);
+      if (back) return Promise.resolve(back);
+    }
+    const ts = this.now();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO knowledge_atoms
+           (id, workspace_id, kind, subject_type, subject_id, node_path, authority, status,
+            approved_by, fingerprint, payload, observed_at, created_at, updated_at)
+         VALUES (?, ?, 'remedy', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        atom.id, workspaceId, atom.source.kind, atom.source.id, atom.source.node_path,
+        atom.authority, atom.status, atom.approved_by, atom.fingerprint,
+        JSON.stringify(atom), atom.observed_at, atom.created_at || ts, ts,
+      );
+    return Promise.resolve(atom);
+  }
+
+  listProposedRemedyAtoms(workspaceId: string): Promise<RemedyAtom[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM knowledge_atoms
+          WHERE workspace_id = ? AND kind = 'remedy' AND status = 'proposed'
+          ORDER BY created_at ASC`,
+      )
+      .all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(
+      rows.map((r) => this.rowToRemedyAtom(r)).filter((a): a is RemedyAtom => a !== null),
+    );
+  }
+
+  /**
+   * The DELIVERY read path: approved, active remedies. `listProposedRemedyAtoms` served review;
+   * this serves the agent. Lifecycle is still enforced downstream by `isRemedyDeliverable` (which
+   * also checks the evidence state), but filtering to active+human here keeps the query cheap and
+   * the intent explicit. Uses the existing `idx_atoms_pending(workspace_id, kind, status)` index.
+   */
+  listActiveRemedyAtoms(workspaceId: string): Promise<RemedyAtom[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM knowledge_atoms
+          WHERE workspace_id = ? AND kind = 'remedy' AND status = 'active' AND authority = 'human'
+          ORDER BY observed_at DESC, id ASC`,
+      )
+      .all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(
+      rows.map((r) => this.rowToRemedyAtom(r)).filter((a): a is RemedyAtom => a !== null),
+    );
+  }
+
+  /**
+   * Resolve a remedy's delivery SCOPE from its source, so an approved remedy learned under one path
+   * is not delivered everywhere. For a memory-sourced remedy the scope is the source memory's node
+   * `relative_path` (resolved fresh, so re-parenting the memory moves its remedy). A memory with no
+   * node, or a source that no longer exists, resolves to null = workspace-global, which is correct:
+   * an unplaced memory is workspace-wide knowledge. This resolves at DELIVERY time and touches no
+   * frozen capture code.
+   */
+  private resolveRemedyScope(atom: RemedyAtom): string | null {
+    if (atom.source.node_path && atom.source.node_path.trim()) return atom.source.node_path;
+    if (atom.source.kind !== "memory") return null;
+    const row = this.db
+      .prepare(
+        `SELECT n.relative_path AS p
+           FROM memories m JOIN nodes n ON n.id = m.node_id
+          WHERE m.id = ? AND n.relative_path <> ''`,
+      )
+      .get(atom.source.id) as { p?: string } | undefined;
+    return row?.p ? row.p : null;
+  }
+
+  /** Sync core: deliverable active remedies, resolved scope, sorted strongest+most-recent first. */
+  private activeScopedRemediesSync(workspaceId: string): Array<{ atom: RemedyAtom; scope: string | null }> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM knowledge_atoms
+          WHERE workspace_id = ? AND kind = 'remedy' AND status = 'active' AND authority = 'human'`,
+      )
+      .all(workspaceId) as Array<Record<string, unknown>>;
+    const rank: Record<string, number> = { HUMAN_AUTHORED: 3, REPEATED_SUCCESS: 2, OBSERVED_SUCCESS: 1 };
+    return rows
+      .map((r) => this.rowToRemedyAtom(r))
+      .filter((a): a is RemedyAtom => a !== null && isRemedyDeliverable(a))
+      .sort((a, b) =>
+        (rank[b.evidence_state] ?? 0) - (rank[a.evidence_state] ?? 0) ||
+        String(b.observed_at).localeCompare(String(a.observed_at)) ||
+        a.id.localeCompare(b.id))
+      .map((atom) => ({ atom, scope: this.resolveRemedyScope(atom) }));
+  }
+
+  /** Active remedies paired with their resolved delivery scope. The input to Agent IR compilation. */
+  listActiveScopedRemedies(workspaceId: string): Promise<Array<{ atom: RemedyAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedRemediesSync(workspaceId));
+  }
+
+  /** Deliverable active remedies PROJECTED into advisories, for the hook index. Sync, no model. */
+  advisoriesForHookIndex(workspaceId: string): RemedyAdvisory[] {
+    return this.activeScopedRemediesSync(workspaceId).map(({ atom, scope }) => projectRemedyToAdvisory(atom, scope));
+  }
+
+  // ── SELECTION + PROCEDURE atoms (V31): same generic knowledge_atoms table, kind-discriminated ──
+
+  /**
+   * Generic delivery-scope resolution shared by every atom kind: the source's explicit node_path, else
+   * a memory source's node relative_path (resolved fresh), else null (workspace-global). Mirrors
+   * `resolveRemedyScope` without touching it, so the frozen remedy path is unchanged.
+   */
+  private resolveSourceScope(source: { kind: "memory" | "rule"; id: string; node_path: string | null }): string | null {
+    if (source.node_path && source.node_path.trim()) return source.node_path;
+    if (source.kind !== "memory") return null;
+    const row = this.db
+      .prepare(`SELECT n.relative_path AS p FROM memories m JOIN nodes n ON n.id = m.node_id WHERE m.id = ? AND n.relative_path <> ''`)
+      .get(source.id) as { p?: string } | undefined;
+    return row?.p ? row.p : null;
+  }
+
+  /** Insert a proposed atom of any kind into knowledge_atoms. Idempotent by fingerprint, like remedy. */
+  private proposeTypedAtom(workspaceId: string, kind: string, atom: { id: string; fingerprint: string; source: { kind: string; id: string; node_path: string | null }; authority: string; status: string; approved_by: string | null; observed_at: string; created_at: string }): void {
+    const ts = this.now();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO knowledge_atoms
+           (id, workspace_id, kind, subject_type, subject_id, node_path, authority, status, approved_by, fingerprint, payload, observed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(atom.id, workspaceId, kind, atom.source.kind, atom.source.id, atom.source.node_path, atom.authority, atom.status, atom.approved_by, atom.fingerprint, JSON.stringify(atom), atom.observed_at, atom.created_at || ts, ts);
+  }
+
+  private rowToSelectionAtom(row: Record<string, unknown>): SelectionAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown; try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parseSelectionAtom(parsed);
+    if (!atom) return null;
+    const status = row["status"]; const authority = row["authority"];
+    return { ...atom, status: status === "active" || status === "rejected" ? status : "proposed", authority: authority === "human" ? "human" : "inferred", approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null };
+  }
+
+  private rowToProcedureAtom(row: Record<string, unknown>): ProcedureAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown; try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parseProcedureAtom(parsed);
+    if (!atom) return null;
+    const status = row["status"]; const authority = row["authority"];
+    return { ...atom, status: status === "active" || status === "rejected" ? status : "proposed", authority: authority === "human" ? "human" : "inferred", approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null };
+  }
+
+  proposeSelectionAtom(workspaceId: string, atom: SelectionAtom): Promise<SelectionAtom> {
+    const existing = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?").get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    if (existing) { const back = this.rowToSelectionAtom(existing); if (back) return Promise.resolve(back); }
+    this.proposeTypedAtom(workspaceId, "selection", atom);
+    return Promise.resolve(atom);
+  }
+
+  proposeProcedureAtom(workspaceId: string, atom: ProcedureAtom): Promise<ProcedureAtom> {
+    const existing = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?").get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    if (existing) { const back = this.rowToProcedureAtom(existing); if (back) return Promise.resolve(back); }
+    this.proposeTypedAtom(workspaceId, "procedure", atom);
+    return Promise.resolve(atom);
+  }
+
+  listProposedSelectionAtoms(workspaceId: string): Promise<SelectionAtom[]> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'selection' AND status = 'proposed' ORDER BY created_at ASC").all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(rows.map((r) => this.rowToSelectionAtom(r)).filter((a): a is SelectionAtom => a !== null));
+  }
+
+  listProposedProcedureAtoms(workspaceId: string): Promise<ProcedureAtom[]> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'procedure' AND status = 'proposed' ORDER BY created_at ASC").all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(rows.map((r) => this.rowToProcedureAtom(r)).filter((a): a is ProcedureAtom => a !== null));
+  }
+
+  decideSelectionAtom(workspaceId: string, atomId: string, decision: "approve" | "reject", decidedBy: string): Promise<SelectionAtom | null> {
+    const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ? AND kind = 'selection'").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    const current = row ? this.rowToSelectionAtom(row) : null;
+    if (!current) return Promise.resolve(null);
+    const next = decision === "approve" ? approveSelection(current, decidedBy) : rejectSelection(current, decidedBy);
+    this.db.prepare("UPDATE knowledge_atoms SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ? WHERE workspace_id = ? AND id = ?").run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
+  }
+
+  decideProcedureAtom(workspaceId: string, atomId: string, decision: "approve" | "reject", decidedBy: string): Promise<ProcedureAtom | null> {
+    const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ? AND kind = 'procedure'").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    const current = row ? this.rowToProcedureAtom(row) : null;
+    if (!current) return Promise.resolve(null);
+    const next = decision === "approve" ? approveProcedure(current, decidedBy) : rejectProcedure(current, decidedBy);
+    this.db.prepare("UPDATE knowledge_atoms SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ? WHERE workspace_id = ? AND id = ?").run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
+  }
+
+  private activeScopedSelectionsSync(workspaceId: string): Array<{ atom: SelectionAtom; scope: string | null }> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'selection' AND status = 'active' AND authority = 'human'").all(workspaceId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToSelectionAtom(r)).filter((a): a is SelectionAtom => a !== null && isSelectionDeliverable(a)).map((atom) => ({ atom, scope: this.resolveSourceScope(atom.source) }));
+  }
+
+  private activeScopedProceduresSync(workspaceId: string): Array<{ atom: ProcedureAtom; scope: string | null }> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'procedure' AND status = 'active' AND authority = 'human'").all(workspaceId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToProcedureAtom(r)).filter((a): a is ProcedureAtom => a !== null && isProcedureDeliverable(a)).map((atom) => ({ atom, scope: this.resolveSourceScope(atom.source) }));
+  }
+
+  listActiveScopedSelections(workspaceId: string): Promise<Array<{ atom: SelectionAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedSelectionsSync(workspaceId));
+  }
+
+  listActiveScopedProcedures(workspaceId: string): Promise<Array<{ atom: ProcedureAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedProceduresSync(workspaceId));
+  }
+
+  /** Deliverable active selections/procedures projected into advisories, for the hook index. No model. */
+  selectionsForHookIndex(workspaceId: string): SelectionAdvisory[] {
+    return this.activeScopedSelectionsSync(workspaceId).map(({ atom, scope }) => projectSelectionToAdvisory(atom, scope));
+  }
+
+  proceduresForHookIndex(workspaceId: string): ProcedureAdvisory[] {
+    return this.activeScopedProceduresSync(workspaceId).map(({ atom, scope }) => projectProcedureToAdvisory(atom, scope));
+  }
+
+  // ── CONTEXT + RATIONALE atoms (V32): same generic knowledge_atoms table, kind-discriminated ──
+
+  private rowToContextAtom(row: Record<string, unknown>): ContextAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown; try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parseContextAtom(parsed);
+    if (!atom) return null;
+    const status = row["status"]; const authority = row["authority"];
+    return { ...atom, status: status === "active" || status === "rejected" ? status : "proposed", authority: authority === "human" ? "human" : "inferred", approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null };
+  }
+
+  private rowToRationaleAtom(row: Record<string, unknown>): RationaleAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown; try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parseRationaleAtom(parsed);
+    if (!atom) return null;
+    const status = row["status"]; const authority = row["authority"];
+    return { ...atom, status: status === "active" || status === "rejected" ? status : "proposed", authority: authority === "human" ? "human" : "inferred", approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null };
+  }
+
+  proposeContextAtom(workspaceId: string, atom: ContextAtom): Promise<ContextAtom> {
+    const existing = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?").get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    if (existing) { const back = this.rowToContextAtom(existing); if (back) return Promise.resolve(back); }
+    this.proposeTypedAtom(workspaceId, "context", atom);
+    return Promise.resolve(atom);
+  }
+
+  proposeRationaleAtom(workspaceId: string, atom: RationaleAtom): Promise<RationaleAtom> {
+    const existing = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?").get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    if (existing) { const back = this.rowToRationaleAtom(existing); if (back) return Promise.resolve(back); }
+    this.proposeTypedAtom(workspaceId, "rationale", atom);
+    return Promise.resolve(atom);
+  }
+
+  listProposedContextAtoms(workspaceId: string): Promise<ContextAtom[]> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'context' AND status = 'proposed' ORDER BY created_at ASC").all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(rows.map((r) => this.rowToContextAtom(r)).filter((a): a is ContextAtom => a !== null));
+  }
+
+  listProposedRationaleAtoms(workspaceId: string): Promise<RationaleAtom[]> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'rationale' AND status = 'proposed' ORDER BY created_at ASC").all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(rows.map((r) => this.rowToRationaleAtom(r)).filter((a): a is RationaleAtom => a !== null));
+  }
+
+  decideContextAtom(workspaceId: string, atomId: string, decision: "approve" | "reject", decidedBy: string): Promise<ContextAtom | null> {
+    const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ? AND kind = 'context'").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    const current = row ? this.rowToContextAtom(row) : null;
+    if (!current) return Promise.resolve(null);
+    const next = decision === "approve" ? approveContext(current, decidedBy) : rejectContext(current, decidedBy);
+    this.db.prepare("UPDATE knowledge_atoms SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ? WHERE workspace_id = ? AND id = ?").run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
+  }
+
+  decideRationaleAtom(workspaceId: string, atomId: string, decision: "approve" | "reject", decidedBy: string): Promise<RationaleAtom | null> {
+    const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ? AND kind = 'rationale'").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    const current = row ? this.rowToRationaleAtom(row) : null;
+    if (!current) return Promise.resolve(null);
+    const next = decision === "approve" ? approveRationale(current, decidedBy) : rejectRationale(current, decidedBy);
+    this.db.prepare("UPDATE knowledge_atoms SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ? WHERE workspace_id = ? AND id = ?").run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
+  }
+
+  private activeScopedContextsSync(workspaceId: string): Array<{ atom: ContextAtom; scope: string | null }> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'context' AND status = 'active' AND authority = 'human'").all(workspaceId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToContextAtom(r)).filter((a): a is ContextAtom => a !== null && isContextDeliverable(a)).map((atom) => ({ atom, scope: this.resolveSourceScope(atom.source) }));
+  }
+
+  private activeScopedRationalesSync(workspaceId: string): Array<{ atom: RationaleAtom; scope: string | null }> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'rationale' AND status = 'active' AND authority = 'human'").all(workspaceId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToRationaleAtom(r)).filter((a): a is RationaleAtom => a !== null && isRationaleDeliverable(a)).map((atom) => ({ atom, scope: this.resolveSourceScope(atom.source) }));
+  }
+
+  listActiveScopedContexts(workspaceId: string): Promise<Array<{ atom: ContextAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedContextsSync(workspaceId));
+  }
+  listActiveScopedRationales(workspaceId: string): Promise<Array<{ atom: RationaleAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedRationalesSync(workspaceId));
+  }
+
+  contextsForHookIndex(workspaceId: string): ContextAdvisory[] {
+    return this.activeScopedContextsSync(workspaceId).map(({ atom, scope }) => projectContextToAdvisory(atom, scope));
+  }
+  rationalesForHookIndex(workspaceId: string): RationaleAdvisory[] {
+    return this.activeScopedRationalesSync(workspaceId).map(({ atom, scope }) => projectRationaleToAdvisory(atom, scope));
+  }
+
+  // ── PRECEDENCE atoms (V33): generic knowledge_atoms table + deterministic conflict resolution ──
+
+  private rowToPrecedenceAtom(row: Record<string, unknown>): PrecedenceAtom | null {
+    const payload = typeof row["payload"] === "string" ? row["payload"] : "{}";
+    let parsed: unknown; try { parsed = JSON.parse(payload); } catch { return null; }
+    const atom = parsePrecedenceAtom(parsed);
+    if (!atom) return null;
+    const status = row["status"]; const authority = row["authority"];
+    return { ...atom, status: status === "active" || status === "rejected" ? status : "proposed", authority: authority === "human" ? "human" : "inferred", approved_by: typeof row["approved_by"] === "string" ? row["approved_by"] : null };
+  }
+
+  proposePrecedenceAtom(workspaceId: string, atom: PrecedenceAtom): Promise<PrecedenceAtom> {
+    const existing = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND fingerprint = ?").get(workspaceId, atom.fingerprint) as Record<string, unknown> | undefined;
+    if (existing) { const back = this.rowToPrecedenceAtom(existing); if (back) return Promise.resolve(back); }
+    this.proposeTypedAtom(workspaceId, "precedence", atom);
+    return Promise.resolve(atom);
+  }
+
+  listProposedPrecedenceAtoms(workspaceId: string): Promise<PrecedenceAtom[]> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'precedence' AND status = 'proposed' ORDER BY created_at ASC").all(workspaceId) as Array<Record<string, unknown>>;
+    return Promise.resolve(rows.map((r) => this.rowToPrecedenceAtom(r)).filter((a): a is PrecedenceAtom => a !== null));
+  }
+
+  decidePrecedenceAtom(workspaceId: string, atomId: string, decision: "approve" | "reject", decidedBy: string): Promise<PrecedenceAtom | null> {
+    const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ? AND kind = 'precedence'").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    const current = row ? this.rowToPrecedenceAtom(row) : null;
+    if (!current) return Promise.resolve(null);
+    const next = decision === "approve" ? approvePrecedence(current, decidedBy) : rejectPrecedence(current, decidedBy);
+    this.db.prepare("UPDATE knowledge_atoms SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ? WHERE workspace_id = ? AND id = ?").run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
+  }
+
+  private activeScopedPrecedencesSync(workspaceId: string): Array<{ atom: PrecedenceAtom; scope: string | null }> {
+    const rows = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND kind = 'precedence' AND status = 'active' AND authority = 'human'").all(workspaceId) as Array<Record<string, unknown>>;
+    return rows.map((r) => this.rowToPrecedenceAtom(r)).filter((a): a is PrecedenceAtom => a !== null && isPrecedenceActive(a)).map((atom) => ({ atom, scope: this.resolveSourceScope(atom.source) }));
+  }
+
+  listActiveScopedPrecedences(workspaceId: string): Promise<Array<{ atom: PrecedenceAtom; scope: string | null }>> {
+    return Promise.resolve(this.activeScopedPrecedencesSync(workspaceId));
+  }
+
+  /**
+   * V33 hook-path conflict pre-resolution. The standalone hook injects pre-rendered stubs and cannot
+   * run the TS conflict compiler, so this resolves conflicts at index-build time and returns the atom
+   * ids to WITHHOLD. Each conflict group is resolved at its members' own scope using the approved
+   * precedence edges, exactly like the Agent IR compiler; an unresolved/ambiguous/cyclic conflict
+   * withholds every side (the safe default). No model call.
+   */
+  private hookConflictWithheld(workspaceId: string): Set<string> {
+    const edges: PrecedenceEdge[] = this.activeScopedPrecedencesSync(workspaceId).map(({ atom, scope }) => ({ ref: atom.id, winner: atom.winner_evidence.join(" ") || atom.winner_normalized || "", loser: atom.loser_evidence.join(" ") || atom.loser_normalized || "", scope: normalizeScope(scope) }));
+    const cand: ConflictCandidate[] = [
+      ...this.activeScopedRemediesSync(workspaceId).map(({ atom, scope }) => ({ id: atom.id, kind: "remedy" as const, conflictKey: atom.condition_evidence.join(" ") || atom.condition_normalized || "", literal: atom.action_evidence.join(" "), scope: normalizeScope(scope) })),
+      ...this.activeScopedSelectionsSync(workspaceId).map(({ atom, scope }) => ({ id: atom.id, kind: "selection" as const, conflictKey: atom.context_evidence.join(" ") || atom.context_normalized || "", literal: atom.preferred_evidence.join(" "), scope: normalizeScope(scope) })),
+      ...this.activeScopedProceduresSync(workspaceId).map(({ atom, scope }) => ({ id: atom.id, kind: "procedure" as const, conflictKey: atom.operation_evidence.join(" ") || atom.operation_normalized || "", literal: atom.steps.join(" > "), scope: normalizeScope(scope) })),
+    ];
+    const withheld = new Set<string>();
+    // Resolve each distinct candidate scope at that scope, so a scoped precedence applies correctly.
+    const scopes = new Set(cand.map((c) => c.scope));
+    for (const s of scopes) {
+      const inScope = cand.filter((c) => c.scope === s);
+      for (const id of resolveConflicts(inScope, edges, s).withhold) withheld.add(id);
+    }
+    return withheld;
+  }
+
+  /** The set of atom ids the hook should NOT inject because an unresolved conflict (or a lost side) withholds them. */
+  conflictWithheldForHookIndex(workspaceId: string): Set<string> {
+    return this.hookConflictWithheld(workspaceId);
+  }
+
+  /**
+   * Record that a remedy reached an agent execution. Metadata only (the atom id is a hash), local
+   * only. `delivered` is the only event today; `used`/`succeeded`/`failed` are the future seam and
+   * are deliberately NOT written here, because delivery is not success.
+   */
+  recordRemedyDelivery(input: {
+    workspaceId: string; atomId: string; sessionId?: string | null; path?: string | null; event?: string;
+  }): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO remedy_deliveries (workspace_id, atom_id, session_id, path, event, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.workspaceId, input.atomId, input.sessionId ?? null, input.path ?? null, input.event ?? "delivered", this.now());
+    return Promise.resolve();
+  }
+
+  /** Local delivery ledger for observation and tests. Answers "was this atom delivered, when, where". */
+  listRemedyDeliveries(workspaceId: string): Promise<Array<{ atom_id: string; session_id: string | null; path: string | null; event: string; created_at: string }>> {
+    const rows = this.db
+      .prepare(
+        `SELECT atom_id, session_id, path, event, created_at FROM remedy_deliveries
+          WHERE workspace_id = ? ORDER BY created_at ASC, id ASC`,
+      )
+      .all(workspaceId) as Array<{ atom_id: string; session_id: string | null; path: string | null; event: string; created_at: string }>;
+    return Promise.resolve(rows);
+  }
+
+  // ── outcome observation (V30, docs/adr/0003) ──
+
+  /**
+   * Append one categorical evidence row. Append-only and idempotent: an identical observation
+   * (same session, atom, event_type, evidence_kind, path) is not re-inserted, so repeated hooks for
+   * the same event do not inflate the history, while genuinely new observations always append.
+   */
+  recordKnowledgeEvidence(input: {
+    workspaceId: string; atomId: string; deliveryId?: string | null; sessionId?: string | null;
+    path?: string | null; eventType: string; evidenceKind?: string | null; strength?: string | null;
+    reason?: string | null; signature?: string | null;
+  }): Promise<void> {
+    const dup = this.db
+      .prepare(
+        `SELECT 1 FROM knowledge_evidence
+          WHERE workspace_id = ? AND atom_id = ? AND IFNULL(session_id,'') = IFNULL(?,'')
+            AND event_type = ? AND IFNULL(evidence_kind,'') = IFNULL(?,'') AND IFNULL(path,'') = IFNULL(?,'')
+            AND IFNULL(signature,'') = IFNULL(?,'') LIMIT 1`,
+      )
+      .get(input.workspaceId, input.atomId, input.sessionId ?? null, input.eventType, input.evidenceKind ?? null, input.path ?? null, input.signature ?? null);
+    if (dup) return Promise.resolve();
+    this.db
+      .prepare(
+        `INSERT INTO knowledge_evidence
+           (workspace_id, atom_id, delivery_id, session_id, path, event_type, evidence_kind, strength, reason, signature, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(input.workspaceId, input.atomId, input.deliveryId ?? null, input.sessionId ?? null, input.path ?? null, input.eventType, input.evidenceKind ?? null, input.strength ?? null, input.reason ?? null, input.signature ?? null, this.now());
+    return Promise.resolve();
+  }
+
+  /**
+   * Observe ONE agent tool event against the atoms delivered to this session, and record only the
+   * decision. The deterministic engine in `@pathrule/shared/agent-ir/outcome` is the authority; this
+   * method feeds it (delivered atoms with resolved scope + verbatim action evidence) and persists the
+   * categorical result. It NEVER stores the event content. It runs the SAME shared engine the frozen
+   * attribution corpus is measured against, so FALSE_USAGE_ATTRIBUTION stays 0 here too.
+   *
+   * `checkTransition` is supplied by the caller ONLY when a deterministic CHECK for this scope moved
+   * fail -> pass around the event; otherwise the outcome for a code change stays UNKNOWN.
+   */
+  async observeToolEvent(
+    workspaceId: string, sessionId: string, deliveredAtomIds: string[], event: ObservedEvent,
+    checkTransition?: { was_failing: boolean; now_passing: boolean } | null,
+  ): Promise<UsageAttribution[]> {
+    const advisories: DeliveredAdvisory[] = [];
+    for (const atomId of new Set(deliveredAtomIds)) {
+      const row = this.db.prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ?").get(workspaceId, atomId) as Record<string, unknown> | undefined;
+      if (!row) continue;
+      // Generic over atom kind (V31): the evidence table is keyed by opaque atom_id, so the same
+      // deterministic engine observes any advisory once it is reduced to (scope, action_literals).
+      //  - REMEDY: its corrective action literals (unchanged from V30).
+      //  - SELECTION: its preferred choice literal; the agent inserting the preferred option in scope
+      //    is conservative usage evidence, exactly like a remedy action.
+      //  - PROCEDURE: deliberately NOT usage-attributed in V1. A single tool event cannot show an
+      //    ordered multi-step workflow was followed, so procedure usage stays UNKNOWN (the honest
+      //    answer) rather than being over-claimed from one step insertion.
+      if (row["kind"] === "remedy") {
+        const atom = this.rowToRemedyAtom(row);
+        if (!atom || !isRemedyDeliverable(atom)) continue;
+        advisories.push({ atom_id: atom.id, scope: this.resolveRemedyScope(atom), action_literals: atom.action_evidence, variant: atom.variant, condition_literals: atom.condition_evidence });
+      } else if (row["kind"] === "selection") {
+        const atom = this.rowToSelectionAtom(row);
+        if (!atom || !isSelectionDeliverable(atom)) continue;
+        advisories.push({ atom_id: atom.id, scope: this.resolveSourceScope(atom.source), action_literals: atom.preferred_evidence, variant: "trouble", condition_literals: [] });
+      }
+    }
+    const attributions = attributeUsage(advisories, event);
+    const advByAtom = new Map(advisories.map((a) => [a.atom_id, a] as const));
+    for (const at of attributions) {
+      const deliveryId = `${sessionId}:${at.atom_id}`;
+      const path = event.kind === "command" ? null : event.path;
+      // Condition observation is recorded independently of usage: seeing the remedy's triggering
+      // condition (a matching command failing, or its error signature) is evidence in its own right,
+      // and its ABSENCE means "the remedy may never have been needed", never failure.
+      const adv = advByAtom.get(at.atom_id);
+      if (adv) {
+        const cond = observeCondition(adv, event);
+        if (cond.status === "OBSERVED") {
+          await this.recordKnowledgeEvidence({ workspaceId, atomId: at.atom_id, deliveryId, sessionId, path, eventType: "condition_observed", evidenceKind: cond.evidence_kind, strength: "MODERATE", reason: cond.evidence_kind, signature: cond.signature });
+        }
+      }
+      if (at.status === "NOT_OBSERVED") continue; // record only signals, never the absence of one
+      const eventType = at.status === "ATTRIBUTED" ? "usage_attributed" : at.status === "AMBIGUOUS" ? "usage_ambiguous" : "usage_possible";
+      await this.recordKnowledgeEvidence({ workspaceId, atomId: at.atom_id, deliveryId, sessionId, path, eventType, evidenceKind: at.evidence_kind, strength: at.strength, reason: at.reason });
+      // Outcome, only for a genuinely ATTRIBUTED usage, and always narrow.
+      if (at.status !== "ATTRIBUTED") continue;
+      const outcome = event.kind === "command"
+        ? classifyCommandOutcome(at, event.exit_code)
+        : classifyCheckOutcome(at, checkTransition ?? null);
+      if (outcome.status === "UNKNOWN") continue; // UNKNOWN is not recorded as an outcome claim
+      await this.recordKnowledgeEvidence({
+        workspaceId, atomId: at.atom_id, deliveryId, sessionId, path,
+        eventType: outcome.status === "SUCCEEDED" ? "outcome_success" : "outcome_failure",
+        evidenceKind: outcome.evidence_kind, strength: outcome.strength, reason: outcome.evidence_kind,
+      });
+    }
+    return attributions;
+  }
+
+  /**
+   * V30 error-persistence outcome (Phase 15): after a remedy's action was ATTRIBUTED, a later command
+   * whose output still carries the SAME error signature the condition was observed under is STRONG
+   * negative evidence that the remedy did not resolve its own condition. A different or absent error
+   * is UNKNOWN, never a success claim. Reads the atom's recorded condition signature; records nothing
+   * unless there was both an attributed usage and a matching persisted signature.
+   */
+  async observeErrorPersistence(workspaceId: string, sessionId: string, atomId: string, laterOutput: string | null): Promise<"FAILED" | "UNKNOWN"> {
+    const usedRow = this.db.prepare("SELECT 1 FROM knowledge_evidence WHERE workspace_id = ? AND atom_id = ? AND IFNULL(session_id,'') = ? AND event_type = 'usage_attributed' LIMIT 1").get(workspaceId, atomId, sessionId);
+    const condRow = this.db.prepare("SELECT signature FROM knowledge_evidence WHERE workspace_id = ? AND atom_id = ? AND IFNULL(session_id,'') = ? AND event_type = 'condition_observed' AND signature IS NOT NULL ORDER BY id DESC LIMIT 1").get(workspaceId, atomId, sessionId) as { signature: string } | undefined;
+    if (!usedRow || !condRow) return "UNKNOWN";
+    const verdict = classifyErrorPersistenceOutcome(
+      { atom_id: atomId, status: "ATTRIBUTED", evidence_kind: "text_inserted", strength: "STRONG", reason: "literal_inserted" },
+      condRow.signature,
+      laterOutput,
+    );
+    if (verdict.status !== "FAILED") return "UNKNOWN";
+    await this.recordKnowledgeEvidence({
+      workspaceId, atomId, deliveryId: `${sessionId}:${atomId}`, sessionId, path: null,
+      eventType: "outcome_failure", evidenceKind: verdict.evidence_kind, strength: verdict.strength,
+      reason: verdict.evidence_kind, signature: condRow.signature,
+    });
+    return "FAILED";
+  }
+
+  /** Read the append-only evidence history for a workspace, optionally one atom. Newest last. */
+  listKnowledgeEvidence(workspaceId: string, atomId?: string): Promise<Array<{ atom_id: string; delivery_id: string | null; session_id: string | null; path: string | null; event_type: string; evidence_kind: string | null; strength: string | null; reason: string | null; signature: string | null; observed_at: string }>> {
+    const cols = "atom_id, delivery_id, session_id, path, event_type, evidence_kind, strength, reason, signature, observed_at";
+    const rows = atomId
+      ? this.db.prepare(`SELECT ${cols} FROM knowledge_evidence WHERE workspace_id = ? AND atom_id = ? ORDER BY observed_at ASC, id ASC`).all(workspaceId, atomId)
+      : this.db.prepare(`SELECT ${cols} FROM knowledge_evidence WHERE workspace_id = ? ORDER BY observed_at ASC, id ASC`).all(workspaceId);
+    return Promise.resolve(rows as Array<{ atom_id: string; delivery_id: string | null; session_id: string | null; path: string | null; event_type: string; evidence_kind: string | null; strength: string | null; reason: string | null; signature: string | null; observed_at: string }>);
+  }
+
+  /**
+   * V30 debug trace (Phase 37 / Area Z). For a session + atom (a delivery), return the ordered chain
+   * delivery -> observed events -> attribution -> outcome, each row carrying its reason code, so a
+   * reviewer can see WHY an event was or was not attributed without re-running the matcher. Read-only.
+   */
+  explainAtomEvidence(workspaceId: string, sessionId: string, atomId: string): Promise<{
+    delivery_id: string; delivered: number;
+    chain: Array<{ event_type: string; evidence_kind: string | null; strength: string | null; reason: string | null; signature: string | null; path: string | null; observed_at: string }>;
+  }> {
+    const delivered = (this.db.prepare("SELECT COUNT(*) AS n FROM remedy_deliveries WHERE workspace_id = ? AND atom_id = ? AND IFNULL(session_id,'') = ?").get(workspaceId, atomId, sessionId) as { n: number }).n;
+    const chain = this.db.prepare(
+      `SELECT event_type, evidence_kind, strength, reason, signature, path, observed_at
+         FROM knowledge_evidence WHERE workspace_id = ? AND atom_id = ? AND IFNULL(session_id,'') = ?
+        ORDER BY id ASC`,
+    ).all(workspaceId, atomId, sessionId) as Array<{ event_type: string; evidence_kind: string | null; strength: string | null; reason: string | null; signature: string | null; path: string | null; observed_at: string }>;
+    return Promise.resolve({ delivery_id: `${sessionId}:${atomId}`, delivered, chain });
+  }
+
+  /**
+   * Read-only DERIVED counts for one atom. Not authority and not a "success rate": a summary of the
+   * append-only evidence a future reviewer or ranking round could read. Deliveries come from the
+   * delivery ledger, everything else from the evidence history.
+   */
+  /** Atom ids delivered to a session (the second input `observeToolEvent` needs), from the ledger. */
+  private deliveredAtomIdsForSession(workspaceId: string, sessionId: string): string[] {
+    const rows = this.db.prepare("SELECT DISTINCT atom_id FROM remedy_deliveries WHERE workspace_id = ? AND IFNULL(session_id,'') = ?").all(workspaceId, sessionId) as Array<{ atom_id: string }>;
+    return rows.map((r) => r.atom_id);
+  }
+
+  /**
+   * V30 live-runtime drain (Area A). The standalone hook captures each observable tool event to a
+   * local, ephemeral `knowledge-observations.jsonl` (raw before/after/command live only in that local
+   * file, never in the durable DB). This drains it: each line is correlated to the session's delivered
+   * atoms and run through `observeToolEvent`, so a REAL agent action becomes categorical evidence with
+   * NO manual call. The file is renamed to `.consumed` after a successful pass, so replays do not
+   * double-count. Malformed lines are skipped, never fatal. Returns how many events were observed.
+   *
+   * This is the single production seam: the app gateway and the external-client hook both feed the
+   * same JSONL, so attribution lives in one place (the engine) and is never duplicated per engine.
+   */
+  async ingestObservationsFromDisk(workspaceId: string, filePath: string): Promise<{ observed: number; skipped: number }> {
+    if (!existsSync(filePath)) return { observed: 0, skipped: 0 };
+    let raw = "";
+    try { raw = readFileSync(filePath, "utf8"); } catch { return { observed: 0, skipped: 0 }; }
+    let observed = 0;
+    let skipped = 0;
+    for (const rawLine of raw.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (line === "") continue;
+      let rec: { sid?: unknown; event?: unknown; check?: unknown };
+      try { rec = JSON.parse(line) as { sid?: unknown; event?: unknown; check?: unknown }; } catch { skipped += 1; continue; }
+      const sid = typeof rec.sid === "string" ? rec.sid : null;
+      const ev = rec.event as ObservedEvent | undefined;
+      if (!sid || !ev || (ev.kind !== "edit" && ev.kind !== "write" && ev.kind !== "command")) { skipped += 1; continue; }
+      const atomIds = this.deliveredAtomIdsForSession(workspaceId, sid);
+      if (atomIds.length === 0) { skipped += 1; continue; }
+      const check = rec.check as { was_failing: boolean; now_passing: boolean } | null | undefined;
+      await this.observeToolEvent(workspaceId, sid, atomIds, ev, check ?? null);
+      if (ev.kind === "command" && typeof ev.output === "string" && ev.output.length > 0) {
+        for (const atomId of atomIds) await this.observeErrorPersistence(workspaceId, sid, atomId, ev.output);
+      }
+      observed += 1;
+    }
+    try { renameSync(filePath, `${filePath}.consumed`); } catch { /* best effort: a locked file is retried next pass */ }
+    return { observed, skipped };
+  }
+
+  aggregateAtomEvidence(workspaceId: string, atomId: string): Promise<{ delivered: number; attributed: number; possible: number; ambiguous: number; outcome_success: number; outcome_failure: number }> {
+    const delivered = (this.db.prepare("SELECT COUNT(*) AS n FROM remedy_deliveries WHERE workspace_id = ? AND atom_id = ?").get(workspaceId, atomId) as { n: number }).n;
+    const byType = this.db.prepare("SELECT event_type, COUNT(*) AS n FROM knowledge_evidence WHERE workspace_id = ? AND atom_id = ? GROUP BY event_type").all(workspaceId, atomId) as Array<{ event_type: string; n: number }>;
+    const c = (t: string) => byType.find((r) => r.event_type === t)?.n ?? 0;
+    return Promise.resolve({ delivered, attributed: c("usage_attributed"), possible: c("usage_possible"), ambiguous: c("usage_ambiguous"), outcome_success: c("outcome_success"), outcome_failure: c("outcome_failure") });
+  }
+
+  listRemedyAtomsForSubject(
+    subjectType: "memory" | "rule",
+    subjectId: string,
+  ): Promise<RemedyAtom[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM knowledge_atoms
+          WHERE kind = 'remedy' AND subject_type = ? AND subject_id = ?
+          ORDER BY created_at ASC`,
+      )
+      .all(subjectType, subjectId) as Array<Record<string, unknown>>;
+    return Promise.resolve(
+      rows.map((r) => this.rowToRemedyAtom(r)).filter((a): a is RemedyAtom => a !== null),
+    );
+  }
+
+  decideRemedyAtom(
+    workspaceId: string,
+    atomId: string,
+    decision: "approve" | "reject",
+    decidedBy: string,
+  ): Promise<RemedyAtom> {
+    const row = this.db
+      .prepare("SELECT * FROM knowledge_atoms WHERE workspace_id = ? AND id = ?")
+      .get(workspaceId, atomId) as Record<string, unknown> | undefined;
+    // Reject rather than throw: the signature promises a Promise, and a caller using .catch()
+    // would silently miss a synchronous throw. The contract suite caught this divergence
+    // between the two backends.
+    if (!row) return Promise.reject(new Error(`remedy atom ${atomId} not found`));
+    const current = this.rowToRemedyAtom(row);
+    if (!current) return Promise.reject(new Error(`remedy atom ${atomId} is unreadable`));
+    // The transition itself lives in shared, so the lifecycle rules cannot drift between the
+    // place that decides and the place that stores.
+    const next = decision === "approve" ? approveRemedy(current, decidedBy) : rejectRemedy(current, decidedBy);
+    this.db
+      .prepare(
+        `UPDATE knowledge_atoms
+            SET authority = ?, status = ?, approved_by = ?, payload = ?, updated_at = ?
+          WHERE workspace_id = ? AND id = ?`,
+      )
+      .run(next.authority, next.status, next.approved_by, JSON.stringify(next), this.now(), workspaceId, atomId);
+    return Promise.resolve(next);
   }
 
   listPendingRefreshes(

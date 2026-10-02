@@ -14,6 +14,7 @@
 export type { BackendCapabilities } from "./backend/capabilities.js";
 export type { KnowledgeBackend } from "./backend/knowledge-backend.js";
 export type * from "./backend/inputs.js";
+export type * from "./backend/knowledge-map-input.js";
 // Native Knowledge Compilation: the per-directory payload type referenced by
 // KnowledgeBackend.buildKnowledgePayload, plus the pure assembler itself —
 // exported so every backend (including the closed CloudBackend and any

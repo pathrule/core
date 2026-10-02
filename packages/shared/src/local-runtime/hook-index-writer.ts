@@ -15,7 +15,9 @@ import { assembleWarehouse } from "@pathrule/core/backend/hook-index.js";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { localRuntimePaths } from "./paths.js";
-import type { HookIndex } from "../hook-supervisor/types.js";
+import type { HookIndex, KnowledgeGapStub } from "../hook-supervisor/types.js";
+import { knowledgeGapStubsForIndex } from "../knowledge-map/gap-index.js";
+import type { GuidanceEntry } from "../user-intelligence/oversight-map.js";
 
 const EPISODE_REFRESH_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const EPISODE_REFRESH_MIN_INTERVAL_MS = 60_000;
@@ -44,6 +46,40 @@ export async function syncHookIndex(args: {
    * empty (see mcp-server/src/env.ts).
    */
   cloud?: { url: string; anonKey: string };
+  /**
+   * Rendered agent protocol, stamped onto the index so the hook delivers it once
+   * per session instead of the companion files carrying it.
+   *
+   * Never decided here: the caller passes it only when
+   * `resolveProtocolChannel(...).protocolOnIndex` is true, so the file half and
+   * the index half of that decision cannot disagree. Blank or omitted leaves the
+   * field off the index, which is what keeps the hook silent about it.
+   */
+  protocol?: string;
+  /**
+   * Compiled USER preference entries: how the PERSON works, already decided by the user-intelligence
+   * layer (eligible, in scope, rendered, with the terms that make each relevant).
+   *
+   * Passed in rather than read here for the same reason `protocol` is: the caller owns the decision,
+   * and the index is only the channel. The hook may not import anything, so nothing about this layer
+   * can live there; it matches terms against the prompt and carries the line, and that is all.
+   */
+  userPreferences?: Array<{ id: string; line: string; terms: string[]; always: boolean; min?: number; relaxes?: boolean }>;
+  /**
+   * Oversight and expertise-lease entries (`turn-guidance.ts`), passed in for the same reason: the
+   * caller owns the decision. Each is a rendered line under its own heading, matched by risk terms.
+   */
+  guidance?: GuidanceEntry[];
+  /**
+   * Rendered team context block, travelling with the protocol for the same
+   * reason: in signature mode the compiled file that used to carry it is not
+   * written, so the hook is its only remaining channel. Same discipline as
+   * `protocol` — the caller passes it only alongside a signature-mode decision,
+   * and omitting it leaves the field off the index.
+   */
+  teamContext?: string;
+  /** Explicit gap stubs (tests); omitted, the writer computes them when delivery is on. */
+  knowledgeGaps?: KnowledgeGapStub[];
 }): Promise<HookIndexSyncResult> {
   const target = hookIndexPath(args.env, args.workspaceId);
   let refreshedEpisodes = false;
@@ -95,6 +131,40 @@ export async function syncHookIndex(args: {
   if (args.cloud?.url && args.cloud.anonKey) {
     index.cloud_semantic = { url: args.cloud.url, anon_key: args.cloud.anonKey };
   }
+
+  if (typeof args.protocol === "string" && args.protocol.trim().length > 0) {
+    index.protocol = args.protocol;
+  }
+
+  // Omitted entirely when there is nothing to carry, so a person with no learned preferences costs the
+  // hook nothing and the index stays byte-identical to what it was before this layer existed.
+  if (Array.isArray(args.userPreferences) && args.userPreferences.length > 0) {
+    index.user_preferences = args.userPreferences;
+  }
+
+  if (Array.isArray(args.guidance) && args.guidance.length > 0) {
+    index.guidance = args.guidance;
+  }
+
+  // Same channel, same condition: present only when the workspace's companion
+  // files are in signature mode, because that is exactly when the compiled file
+  // that used to carry this block is no longer written.
+  if (typeof args.teamContext === "string" && args.teamContext.trim().length > 0) {
+    index.team_context = args.teamContext;
+  }
+
+  // Open knowledge gaps, decided here rather than by each caller because the whole file
+  // is rewritten on every sync and a caller that forgot the field would erase it. Empty (and so
+  // absent, keeping the index byte-identical) unless knowledgeGapDelivery is on.
+  const knowledgeGaps =
+    args.knowledgeGaps ??
+    (await knowledgeGapStubsForIndex({
+      backend: args.backend,
+      workspaceId: args.workspaceId,
+      workspaceRoot: args.workspaceRoot,
+      env: args.env,
+    }));
+  if (knowledgeGaps.length > 0) index.knowledge_gaps = knowledgeGaps;
 
   // Native Knowledge Compilation: when the backend can compile knowledge into
   // native instruction files, mark the index so the hook stops carrying memory

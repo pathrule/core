@@ -15,13 +15,18 @@
  * contracts layer that this package builds on. core imports shared; the dependency only
  * ever flows one way (enforced by the dependency guard).
  */
+import type { LearningActivity } from "@pathrule/shared/intelligence/activity-learning.js";
+import type { LearningClaimStore } from "@pathrule/shared/project-learning/claims.js";
 import type { Memory, Rule, Skill } from "@pathrule/shared/content-types.js";
+import type { RemedyAtom } from "@pathrule/shared/knowledge/remedy.js";
+import type { CompiledMemoryDelivery } from "@pathrule/shared/agent-ir/compiled-delivery.js";
 import type { HookIndex } from "@pathrule/shared/hook-supervisor/types.js";
 import type { AffinityPayload, EmbeddingsPayload, Warehouse } from "./inputs.js";
 // Type-only: erased at compile time, so referencing the node:crypto-backed
 // hook-index module here adds no runtime dependency for browser consumers.
 import type { HookIndexInput } from "./hook-index.js";
 import type { CompiledKnowledgeNode, KnowledgeRenderMode } from "./knowledge-compiler.js";
+import type { KnowledgeGapSummary, KnowledgeMapInput } from "./knowledge-map-input.js";
 import type {
   ProjectMapSearchResult,
   HotPath,
@@ -33,10 +38,7 @@ import type {
   RecentActivityForRouter,
 } from "@pathrule/shared/intelligence/types.js";
 import type { TreeNode } from "@pathrule/shared/node-types.js";
-import type {
-  RoutingResult,
-  SubtreeMemoryIndexResult,
-} from "@pathrule/shared/routing-types.js";
+import type { RoutingResult, SubtreeMemoryIndexResult } from "@pathrule/shared/routing-types.js";
 import type { DedupCheckArgs, DedupCheckResult } from "@pathrule/shared/tools/dedup-types.js";
 import type { MaterialisedNode } from "@pathrule/shared/tools/node-path.js";
 import type { WorkspaceOverviewNode } from "@pathrule/shared/tools/overview.js";
@@ -76,7 +78,7 @@ import type {
   ClosestNode,
 } from "./inputs.js";
 
-export interface KnowledgeBackend {
+export interface KnowledgeBackend extends LearningClaimStore {
   // ── lifecycle ──────────────────────────────────────────────────────────
   /** Whether the current session is still valid. LocalBackend: always true (single user). */
   sessionIsCurrent(): Promise<boolean>;
@@ -320,6 +322,18 @@ export interface KnowledgeBackend {
     mode?: KnowledgeRenderMode,
   ): Promise<CompiledKnowledgeNode[] | null>;
 
+  /**
+   * Memories delivered as their compiled form, keyed by memory id: for each memory whose approved
+   * atoms the completeness gate judged a complete representation, the text that replaces its body.
+   * The same plan the hook index is built from, for a surface that delivers memory bodies itself.
+   * `memories`, when given, is the text the caller is about to deliver, and the gate judges against it.
+   * Optional: a backend that keeps no atoms (the cloud edition) delivers every memory as written.
+   */
+  compiledMemoryDeliveries?(
+    workspaceId: string,
+    memories?: ReadonlyArray<{ id: string; content: string }>,
+  ): Promise<Record<string, CompiledMemoryDelivery>>;
+
   // ── activity ───────────────────────────────────────────────────────────
   /**
    * Persists an activity row and returns it. The hosted edition additionally stamps the
@@ -327,6 +341,8 @@ export interface KnowledgeBackend {
    * persists the core row only (friction + applied-memory are hosted-only intelligence).
    */
   logActivity(input: LogActivityInput): Promise<ActivityRecord>;
+  /** Bounded, content-free activity evidence for project review priorities. */
+  learningActivities?(workspaceId: string, limit?: number): Promise<LearningActivity[]>;
   recentActivities(scope: ContextScope, limit: number): Promise<Activity[]>;
   /**
    * Recent activities in the get_context router/briefing shape (snake_case + node_path
@@ -376,7 +392,70 @@ export interface KnowledgeBackend {
    * `null` ⇒ capability not wired (field omitted, all other surfaces intact).
    */
   semanticCandidates?(query: SemanticQuery): Promise<SemanticCandidatesResult | null>;
+  /**
+   * Everything the knowledge map needs in one read: live memories, rules and skills
+   * with bodies and node paths, top-k vector neighbours for memories, and per-item session
+   * counts (counts only, never session ids). Optional; a backend without it has no map and
+   * the pathrule_knowledge_map tool says so.
+   */
+  buildKnowledgeMapInput?(workspaceId: string): Promise<KnowledgeMapInput | null>;
+  /**
+   * A cheap key that changes whenever buildKnowledgeMapInput would return different
+   * items, bodies, attachments or vectors. The map cache is keyed on it, so it must be
+   * read-only and fast (no bodies, no vectors).
+   */
+  knowledgeMapFingerprint?(workspaceId: string): Promise<string | null>;
+  /**
+   * Directory scopes a person dismissed as intentionally undocumented (rejected or
+   * snoozed knowledge-gap cases, 180 days). Optional; backends without maintenance cases omit it.
+   */
+  knowledgeGapSuppressedScopes?(workspaceId: string): Promise<string[]>;
+  /**
+   * Open and recently closed knowledge-gap findings, for the map's atlas. Optional;
+   * backends without maintenance findings omit it and the atlas shows no gaps line.
+   */
+  knowledgeGapSummary?(workspaceId: string): Promise<KnowledgeGapSummary | null>;
 
   /** Static description of what this backend can fill. */
   capabilities(): BackendCapabilities;
 }
+
+/**
+ * Typed knowledge atoms that do not belong to a rule (see docs/adr/0001).
+ *
+ * Deliberately NOT part of `KnowledgeBackend`. An atom is inferred by a model running on the
+ * user's own machine over the user's own knowledge, and it stays there: the hosted backend must
+ * not carry these methods, because carrying them is the same as offering to upload the evidence.
+ * Splitting the interface makes that a compile-time fact rather than a convention someone has to
+ * remember. A caller that needs atoms asks for a store that has them.
+ */
+export interface RemedyAtomStore {
+  /**
+   * Store a proposed atom, or return the one already stored for the same evidence.
+   *
+   * Idempotent by fingerprint on purpose: re-analysing the same memory must not mint a second
+   * proposal, and an atom the user already REJECTED must not come back as pending. So an
+   * existing row is returned untouched rather than overwritten.
+   */
+  proposeRemedyAtom(workspaceId: string, atom: RemedyAtom): Promise<RemedyAtom>;
+  /** Atoms awaiting a decision, oldest first. The review queue's only read. */
+  listProposedRemedyAtoms(workspaceId: string): Promise<RemedyAtom[]>;
+  /** Every atom for one subject, whatever its status. */
+  listRemedyAtomsForSubject(
+    subjectType: "memory" | "rule",
+    subjectId: string,
+  ): Promise<RemedyAtom[]>;
+  /**
+   * Record a human decision. Approval is the ONLY transition that makes a remedy reusable, and
+   * it neither executes it nor touches its evidence.
+   */
+  decideRemedyAtom(
+    workspaceId: string,
+    atomId: string,
+    decision: "approve" | "reject",
+    decidedBy: string,
+  ): Promise<RemedyAtom>;
+}
+
+/** A backend that also keeps inferred atoms: the local store, and the in-memory test double. */
+export type LocalKnowledgeBackend = KnowledgeBackend & RemedyAtomStore;

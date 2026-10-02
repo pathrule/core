@@ -106,20 +106,35 @@ export interface ClientRenderResult {
  */
 const SLIM_RENDER_CLIENTS = new Set<AgentTargetId>(["claude-code"]);
 
+export interface RenderForClientsOptions {
+  /**
+   * Clients whose PROTOCOL is delivered by the Pathrule hook, so their
+   * instruction file gets the signature instead. The caller decides, because
+   * only the caller knows whether the hook is actually installed for that
+   * client in this workspace: signature mode with no hook would drop the
+   * protocol entirely, which is a silent behaviour regression rather than a
+   * smaller file. Empty/omitted ⇒ every client renders exactly as before.
+   */
+  protocolOnHook?: readonly AgentTargetId[];
+}
+
 export function renderForClients(
   input: MultiClientInput,
   enabled: readonly AgentTargetId[],
+  options: RenderForClientsOptions = {},
 ): ClientRenderResult[] {
+  const signatureClients = new Set<AgentTargetId>(options.protocolOnHook ?? []);
   const out: ClientRenderResult[] = [];
   for (const id of enabled) {
     const spec: ClientRendererSpec | null = getRenderer(id);
     if (!spec) continue;
     // Slim clients see the router projection in place of `knowledge`; the swap
     // is centralized here so per-client renderers stay knowledge-shape-agnostic.
-    const clientInput: MultiClientInput =
+    let clientInput: MultiClientInput =
       SLIM_RENDER_CLIENTS.has(id) && input.knowledgeSlim
         ? { ...input, knowledge: input.knowledgeSlim }
         : input;
+    if (signatureClients.has(id)) clientInput = { ...clientInput, companionMode: "signature" };
     out.push({
       client: id,
       files: spec.render(clientInput),

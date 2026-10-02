@@ -1,5 +1,6 @@
 // Shared shapes for the content layer and the MCP read tools.
 
+import type { RuleAtom } from "./knowledge/atoms.js";
 import type { SkillPackageStatus } from "./skills/package-types.js";
 
 export type MemorySource = "claude" | "manual";
@@ -87,6 +88,13 @@ export interface Rule {
   semanticTags?: string[];
   /** Number of times this rule was injected into AI context in the active usage window. */
   usageCount30d?: number;
+  /**
+   * Executable knowledge atoms attached to this rule: CONSTRAINT atoms compile to the
+   * stub's `enforcement` / `block_pattern`, CHECK atoms to `required_check`, and only
+   * when an atom is both `human` and `active`. Absent on editions that do not store
+   * them, and absent rather than `[]` when there are none.
+   */
+  constraints?: RuleAtom[];
 }
 
 // MainMemoryEntry was an earlier per-node "router" UI shape. Replaced by

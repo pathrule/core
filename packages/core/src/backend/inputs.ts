@@ -5,6 +5,9 @@
  * not a storage client — is the source of truth.
  */
 
+import type { ActivityProvenance } from "@pathrule/shared/intelligence/activity-learning.js";
+import type { RuleAtom } from "@pathrule/shared/knowledge/atoms.js";
+
 /** A path within a workspace — the scope most context calls resolve against. */
 export interface ContextScope {
   workspaceId: string;
@@ -21,6 +24,11 @@ export interface WarehouseEntry {
   title: string;
   body: string;
   content_hash: string;
+  /**
+   * Memory delivered as its compiled form: the atom refs that form is made of. The hook skips the body
+   * when these refs already reached the session as advisories, and records them when the body ships.
+   */
+  compiled_refs?: string[];
 }
 
 /** The full-body warehouse: every memory/rule/skill keyed by id. */
@@ -120,6 +128,11 @@ export interface WriteRuleInput {
   content: string;
   scopeType: "folder" | "file_type" | "project";
   priority?: "high" | "medium" | "low";
+  /**
+   * Executable CONSTRAINT atoms, already validated and stamped by the caller. The
+   * backend stores them verbatim: it is not the place that decides authority.
+   */
+  constraints?: RuleAtom[];
 }
 export interface UpdateRuleInput {
   id: string;
@@ -131,6 +144,8 @@ export interface UpdateRuleInput {
   priority?: "high" | "medium" | "low";
   /** Re-home the rule's node attachment (the move_to_path target, already resolved). */
   nodeId?: string;
+  /** Replaces the stored constraint list when present; omit to leave it untouched. */
+  constraints?: RuleAtom[];
 }
 export interface ListRulesQuery {
   workspaceId: string;
@@ -211,6 +226,7 @@ export interface ActivityTeamIntelligenceSignal {
   surface: "chat" | "tasks" | "design";
 }
 export interface LogActivityInput {
+  provenance?: ActivityProvenance;
   workspaceId: string;
   nodePath?: string;
   domain: string;
@@ -249,6 +265,7 @@ export interface LogActivityInput {
 }
 /** The persisted activity row, returned by `logActivity` so callers can echo id/created_at. */
 export interface ActivityRecord {
+  provenance?: ActivityProvenance;
   id: string;
   workspaceId: string;
   nodePath: string;

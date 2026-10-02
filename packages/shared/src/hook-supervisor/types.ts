@@ -167,12 +167,37 @@ export interface RuleStub {
   preview: string;
   node_path?: string;
   /**
-   * Extracted at index build time from rule.content when the body
-   * contains a `BLOCK_PATTERN: /regex/flags` marker. Hook script tests this
-   * regex against tool_input (new_string / content / command) and denies on
-   * match. Only populated when `enforcement === 'strict'`.
+   * Compiled from the rule's CONSTRAINT atoms (`rules.constraints`) at index build
+   * time, and only for an atom that is both `authority: human` and `status: active`.
+   * The hook tests this regex against tool_input (new_string / content / command)
+   * and denies on match. Only populated when `enforcement === 'strict'`.
+   *
+   * `message` is the author's remedy, carried so a deny can say what to do instead.
+   * Optional because the legacy `BLOCK_PATTERN:` marker path produced no message; the
+   * hook reads only `source` and `flags`, so adding it changes no runtime behaviour.
    */
-  block_pattern?: { source: string; flags: string };
+  block_pattern?: { source: string; flags: string; message?: string };
+  /**
+   * Compiled from a CONSTRAINT atom that narrows by PATH rather than by content. The hook
+   * denies an Edit/Write whose file path falls inside `scope_path` (exact or descendant)
+   * and, when given, carries one of `file_extensions`.
+   *
+   * Present alongside `block_pattern` it is an AND; present alone the constraint has no
+   * content pattern at all, which is the right target for a rule about where a file may
+   * live rather than what it may contain.
+   */
+  block_path?: { scope_path: string; file_extensions?: string[]; message?: string };
+  /**
+   * Compiled from the rule's CHECK atoms, and only for an atom that is both
+   * `authority: human` and `status: active`. The hook marks the check pending when an
+   * Edit/Write lands under `scope_path`, clears it when the evidence channel reports a
+   * PASS for `fingerprint`, and blocks Stop while it is pending.
+   *
+   * `fingerprint` is the canonical form of `command` from
+   * `verification-evidence.classifyVerificationCommand`, computed at authoring time and
+   * carried as data because the cloud index builder is SQL and cannot run the classifier.
+   */
+  required_check?: { scope_path: string; command: string; fingerprint: string; message: string };
   /**
    * Explicit API / symbol markers the rule actually talks about.
    * Auto-extracted from markdown inline-code (`` `foo.bar` ``) at index build
@@ -234,6 +259,24 @@ export interface WorkEpisodeStub {
   confidence: "low" | "medium" | "high";
 }
 
+/**
+ * A REMEDY advisory as it sits in the hook index: a pre-rendered neutral markdown line plus the
+ * atom fingerprint `ref`. The line is compiled once at index-build time by the engine-neutral Agent
+ * IR renderer; the hook only selects by path, budgets, injects, and records `ref` to the local
+ * delivery ledger. No knowledge content beyond the rendered line is stored, and `ref` is an opaque
+ * hash, so nothing here is agent-identifying or cloud-bound.
+ */
+export interface AdvisoryStub {
+  ref: string;
+  line: string;
+  /**
+   * Id of the memory this line was compiled from, when the completeness gate cleared that memory's
+   * compiled form. Lines sharing a group are delivered together or not at all. Absent for lines with
+   * no source memory to judge against (a rule's atoms, or a memory no longer active).
+   */
+  group?: string;
+}
+
 export interface HookIndex {
   /** Schema version — bump when breaking changes. Shell script checks this. */
   schema_version: 1 | 2;
@@ -250,6 +293,18 @@ export interface HookIndex {
 
   /** Rules with scope_type='project' — relevant for every tool call. */
   project_rules: RuleStub[];
+
+  /**
+   * Map: scope node_path → approved REMEDY advisories learned under that path. The hook walks the
+   * parent chain of the tool's path (same as path_rules) to collect applicable advisories, so a
+   * remedy learned under /apps/web reaches an edit in /apps/web but never /apps/api. Each stub is a
+   * pre-rendered advisory line plus the atom `ref` (fingerprint) for the local delivery ledger.
+   * Advisories are ADVISORY: subordinate to rules and constraints, injected in their own labelled
+   * section. Absent when the workspace has no deliverable remedies.
+   */
+  path_advisories?: Record<string, AdvisoryStub[]>;
+  /** Approved remedies with workspace-global scope (source memory unplaced); apply to every path. */
+  project_advisories?: AdvisoryStub[];
 
   /** Top subjects from activity logs (last 30 days, max 100) — used by Bloom-style pre-gate. */
   recent_subjects: string[];
@@ -271,6 +326,35 @@ export interface HookIndex {
   knowledge_compiled?: boolean;
   /** Memory ids whose BODY is in the FULL compiled file — full clients skip these in delta injection. */
   compiled_memory_ids?: string[];
+
+  /**
+   * The agent protocol, delivered by the hook ONCE per session instead of being
+   * compiled into the companion files.
+   *
+   * Present only for a workspace whose companion files are in signature mode.
+   * Absent means the protocol still lives on disk and the hook says nothing, so
+   * the field is the switch as well as the payload — one source of truth, no
+   * env-var coordination between the renderer process and the hook process.
+   *
+   * The hook prepends it AFTER its own context cap, because the protocol is
+   * framing rather than a ranked item: folding it into the budget would push
+   * knowledge out of the first prompt of every session.
+   */
+  protocol?: string;
+
+  /**
+   * The team context block, delivered on the same channel as the protocol and
+   * for the same reason: in signature mode the compiled files that used to carry
+   * it are not written at all.
+   *
+   * It used to ride the compiled file because "the hook channel is paid PER
+   * TURN" — true of the prompt channel, and the reason this block was kept out
+   * of it. SessionStart is not that channel: Claude Code merges its
+   * additionalContext into the SYSTEM PROMPT once for the session, so a constant
+   * block costs the same one-time price the compiled file charged, and the
+   * prompt channel stays for what actually varies with the prompt.
+   */
+  team_context?: string;
 
   /**
    * Slim (router) projection ids. For clients with a prompt-time body
@@ -346,6 +430,40 @@ export interface HookIndex {
    * `experiments.rule_promotion_v1` to gate injection_strategy behavior.
    */
   experiments?: Record<string, boolean>;
+  /**
+   * Compiled USER preference entries: how the PERSON works, decided by the user-intelligence layer and
+   * carried here so the hook can deliver it through the same channel as everything else. Absent when
+   * the person has no deliverable preferences, which keeps the index unchanged for everyone else.
+   */
+  user_preferences?: Array<{ id: string; line: string; terms: string[]; always: boolean; min?: number; relaxes?: boolean }>;
+  /**
+   * Folded risk terms (see `risk-gate.ts`). Present only alongside a preference marked `relaxes`, which
+   * the hook drops for any prompt that hits one of these: a learned habit never lowers the bar on auth,
+   * payments, migrations or crypto. Carried in the index so the hook and Studio apply ONE list.
+   */
+  user_preference_risk_terms?: string[];
+  /**
+   * Oversight ("verify these changes yourself") and expertise-lease entries for this workspace, rendered
+   * upstream (`turn-guidance.ts`). The hook prints each under its heading when one of its terms hits the
+   * prompt by the risk rule, once per session. Absent when there is nothing to say.
+   */
+  guidance?: Array<{ id: string; heading: string; line: string; terms: string[] }>;
+  /**
+   * Open knowledge gaps. The hook delivers at most one per tool event, once per session per
+   * ref, and only on an Edit or Write inside `scope`. Absent when there are no open gaps or in-flow
+   * delivery is off (`knowledgeGapDelivery`), which keeps the index byte-identical for everyone else.
+   */
+  knowledge_gaps?: KnowledgeGapStub[];
+}
+
+/** One open knowledge gap as the hook sees it. Pre-rendered; paths only, never content. */
+export interface KnowledgeGapStub {
+  /** Session ledger key: "gap_" + stableHash("gap:" + scope). */
+  ref: string;
+  /** Directory without a leading slash ("packages/cli/src"). */
+  scope: string;
+  /** At most 280 chars. */
+  line: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -14,6 +14,12 @@
  * formulas are reference-only (derive from what's stored) and capabilities() reports a
  * pure-local, no-AI profile.
  */
+import type {
+  LearningClaim,
+  LearningClaimRevision,
+} from "@pathrule/shared/project-learning/claims.js";
+import type { LearningActivity } from "@pathrule/shared/intelligence/activity-learning.js";
+import { activityRecord, InMemoryLearningStore, projectActivity } from "./in-memory-activity.js";
 import { randomUUID } from "node:crypto";
 import type { Memory, Rule, Skill } from "@pathrule/shared/content-types.js";
 import type { HookIndex } from "@pathrule/shared/hook-supervisor/types.js";
@@ -48,10 +54,22 @@ import { normalizeNodePath, guessLeafType } from "@pathrule/shared/tools/node-pa
 import { buildWorkspaceOverview } from "@pathrule/shared/tools/overview.js";
 import { runAiRouteAdapter, hasAiRouteKey } from "./ai-route-adapter.js";
 import { rankProjectMap, type ProjectMapCandidate } from "./project-map-rank.js";
-import { activityTouchedPaths, rankCoupledPaths } from "./co-change-rank.js";
+import { rankCoupledPaths } from "./co-change-rank.js";
 import { searchEpisodes, clusterEpisodes, type EpisodeActivity } from "./work-episodes.js";
 import { assembleBriefingLocal } from "./briefing.js";
-import { assembleHookIndex, assembleWarehouse, type HookIndexInput, type HookRuleInput } from "./hook-index.js";
+import {
+  assembleHookIndex,
+  assembleWarehouse,
+  type HookIndexInput,
+  type HookRuleInput,
+} from "./hook-index.js";
+import { parseRuleAtoms } from "@pathrule/shared/knowledge/atoms.js";
+import {
+  approveRemedy,
+  parseRemedyAtom,
+  rejectRemedy,
+  type RemedyAtom,
+} from "@pathrule/shared/knowledge/remedy.js";
 import {
   assembleKnowledgeNodes,
   type CompiledKnowledgeNode,
@@ -69,7 +87,7 @@ import {
   SEMANTIC_QUERY_MIN_SIMILARITY,
 } from "./semantic-rank.js";
 import type { BackendCapabilities } from "./capabilities.js";
-import type { KnowledgeBackend } from "./knowledge-backend.js";
+import type { LocalKnowledgeBackend } from "./knowledge-backend.js";
 import type {
   Activity,
   ActivityRecord,
@@ -220,7 +238,7 @@ export interface InMemoryBackendOptions {
   embed?: EmbedFn;
 }
 
-export class InMemoryKnowledgeBackend implements KnowledgeBackend {
+export class InMemoryKnowledgeBackend implements LocalKnowledgeBackend {
   private readonly memories = new Map<string, Memory>();
   private readonly rules = new Map<string, Rule>();
   private readonly skills = new Map<string, Skill>();
@@ -443,6 +461,18 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   }
 
   // ── rule CRUD ──────────────────────────────────────────────────────────────
+  /**
+   * The parse the other editions do when reading their column. Cloud reads jsonb and
+   * LocalBackend reads TEXT, and both drop a malformed atom on the way out; this store
+   * holds live objects, so its only equivalent boundary is the write. Without it a
+   * caller could plant `authority: "sudo"` here and see it survive, which is the exact
+   * cross-edition divergence a deny gate must not have.
+   */
+  private static normalizeConstraints(input: Rule["constraints"]): Pick<Rule, "constraints"> {
+    const parsed = parseRuleAtoms(input ?? []);
+    return parsed.length > 0 ? { constraints: parsed } : {};
+  }
+
   readRule(id: string): Promise<Rule | null> {
     if (this.archivedRules.has(id)) return Promise.resolve(null);
     return Promise.resolve(this.rules.get(id) ?? null);
@@ -464,6 +494,9 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
       lastEditedAt: ts,
       createdAt: ts,
       updatedAt: ts,
+      // Emitted only when non-empty, matching CloudBackend and LocalBackend, so the
+      // cross-edition shape comparison is like for like.
+      ...InMemoryKnowledgeBackend.normalizeConstraints(input.constraints),
     };
     this.rules.set(rule.id, rule);
     if (input.nodeId) this.ruleNodes.set(rule.id, input.nodeId);
@@ -488,6 +521,9 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
       lastEditedBy: this.principal,
       lastEditedAt: ts,
       updatedAt: ts,
+      ...(input.constraints
+        ? InMemoryKnowledgeBackend.normalizeConstraints(input.constraints)
+        : {}),
     };
     this.rules.set(next.id, next);
     if (input.nodeId) this.ruleNodes.set(next.id, input.nodeId);
@@ -1169,6 +1205,7 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
           priority: r.priority,
           node_paths: node ? [node.relativePath] : [],
           semantic_tags: null,
+          constraints: r.constraints,
         };
       });
 
@@ -1271,50 +1308,35 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
   }
 
   // ── activity ───────────────────────────────────────────────────────────────────
+  // Learning claims and learning activity evidence (in-memory-activity.ts).
+  private readonly learning = new InMemoryLearningStore();
+
+  putLearningClaim(input: LearningClaim): Promise<LearningClaim> {
+    return this.learning.putLearningClaim(input);
+  }
+
+  retiredLearningClaimIds(workspaceId: string, ids: string[]): Promise<string[]> {
+    return this.learning.retiredLearningClaimIds(workspaceId, ids);
+  }
+
+  reviseLearningClaim(raw: LearningClaimRevision): Promise<{ status: "applied"; id: string }> {
+    return this.learning.reviseLearningClaim(raw);
+  }
+
+  listLearningClaims(workspaceId: string, limit = 100): Promise<LearningClaim[]> {
+    return this.learning.listLearningClaims(workspaceId, limit);
+  }
+
+  learningActivities(workspaceId: string, limit = 200): Promise<LearningActivity[]> {
+    return this.learning.learningActivities(workspaceId, limit);
+  }
+
   logActivity(input: LogActivityInput): Promise<ActivityRecord> {
     const subjects = normalizeActivitySubjects(input.subjects);
-    const record: ActivityRecord = {
-      id: this.genId(),
-      workspaceId: input.workspaceId,
-      nodePath: input.nodePath || "/",
-      domain: input.domain,
-      action: input.action,
-      scope: input.scope,
-      subjects,
-      taskSummary: input.taskSummary,
-      filesTouched: input.filesTouched ?? { total: 0, by_area: {} },
-      aiClient: input.aiClient ?? "claude-code",
-      detailLevel: "standard",
-      status: "active",
-      createdAt: this.now(),
-    };
+    const record = activityRecord(input, subjects, this.genId(), this.now());
+    this.learning.recordActivity(record);
     // Friction + applied-memory signals are hosted-only — intentionally dropped here.
-    this.activities.push({
-      id: record.id,
-      nodePath: record.nodePath,
-      domain: record.domain,
-      action: record.action,
-      taskSummary: record.taskSummary,
-      createdAt: record.createdAt,
-    });
-    // Router/briefing projection — keeps files_touched (the lean Activity drops it).
-    this.routerActivities.push({
-      domain: record.domain,
-      action: record.action,
-      task_summary: record.taskSummary,
-      created_at: record.createdAt,
-      node_path: record.nodePath,
-      files_touched: record.filesTouched,
-    });
-    // Retain the episode source (subjects + touched paths) — neither is on the Activity type.
-    this.episodeActivities.push({
-      id: record.id,
-      createdAt: record.createdAt,
-      domain: record.domain,
-      subjects: record.subjects,
-      touchedPaths: activityTouchedPaths(record.filesTouched.by_area, record.nodePath),
-      taskSummary: record.taskSummary,
-    });
+    projectActivity(record, this.activities, this.routerActivities, this.episodeActivities);
     return Promise.resolve(record);
   }
 
@@ -1354,6 +1376,64 @@ export class InMemoryKnowledgeBackend implements KnowledgeBackend {
       body: r?.content ?? "",
       nodePath: node?.relativePath ?? "/",
     };
+  }
+
+  // ── typed knowledge atoms (docs/adr/0001-remedy-atom-persistence.md) ──
+  //
+  // Keyed by `${workspaceId}\u001f${fingerprint}` so the uniqueness the SQLite index enforces
+  // is enforced here too. The stored value is re-parsed on write for the same reason the rule
+  // atoms are: this backend holds live objects, so the write is its only validation boundary.
+  private readonly remedyAtoms = new Map<string, RemedyAtom>();
+
+  private static remedyKey(workspaceId: string, fingerprint: string): string {
+    return `${workspaceId}\u001f${fingerprint}`;
+  }
+
+  proposeRemedyAtom(workspaceId: string, atom: RemedyAtom): Promise<RemedyAtom> {
+    const key = InMemoryKnowledgeBackend.remedyKey(workspaceId, atom.fingerprint);
+    const existing = this.remedyAtoms.get(key);
+    // Idempotent by fingerprint: re-analysis must not mint a second proposal, and an atom the
+    // user already decided on must not be reset to pending.
+    if (existing) return Promise.resolve(existing);
+    const parsed = parseRemedyAtom(JSON.parse(JSON.stringify(atom)) as unknown);
+    if (!parsed) return Promise.reject(new Error("invalid remedy atom"));
+    this.remedyAtoms.set(key, parsed);
+    return Promise.resolve(parsed);
+  }
+
+  listProposedRemedyAtoms(workspaceId: string): Promise<RemedyAtom[]> {
+    const out = [...this.remedyAtoms.entries()]
+      .filter(([k, a]) => k.startsWith(`${workspaceId}\u001f`) && a.status === "proposed")
+      .map(([, a]) => a)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return Promise.resolve(out);
+  }
+
+  listRemedyAtomsForSubject(
+    subjectType: "memory" | "rule",
+    subjectId: string,
+  ): Promise<RemedyAtom[]> {
+    const out = [...this.remedyAtoms.values()]
+      .filter((a) => a.source.kind === subjectType && a.source.id === subjectId)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return Promise.resolve(out);
+  }
+
+  decideRemedyAtom(
+    workspaceId: string,
+    atomId: string,
+    decision: "approve" | "reject",
+    decidedBy: string,
+  ): Promise<RemedyAtom> {
+    const entry = [...this.remedyAtoms.entries()].find(
+      ([k, a]) => k.startsWith(`${workspaceId}\u001f`) && a.id === atomId,
+    );
+    if (!entry) return Promise.reject(new Error(`remedy atom ${atomId} not found`));
+    const [key, current] = entry;
+    const next =
+      decision === "approve" ? approveRemedy(current, decidedBy) : rejectRemedy(current, decidedBy);
+    this.remedyAtoms.set(key, next);
+    return Promise.resolve(next);
   }
 
   listPendingRefreshes(

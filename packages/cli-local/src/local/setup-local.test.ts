@@ -105,7 +105,10 @@ describe("runLocalSetup (e2e)", () => {
     // Hooks + offline index in place.
     expect(existsSync(join(home, "bin", "pathrule-hook.js"))).toBe(true);
     expect(existsSync(join(cwd, ".claude/settings.json"))).toBe(true);
-    expect(existsSync(join(cwd, ".claude/rules/pathrule-protocol.md"))).toBe(true);
+    // Signature mode (default): the protocol rides the hook index, not a file in
+    // the user's repo. Asserted as absent-here + present-there, together, because
+    // either half alone can pass while the workspace has no protocol at all.
+    expect(existsSync(join(cwd, ".claude/rules/pathrule-protocol.md"))).toBe(false);
     expect(existsSync(join(home, "cache", "ws-setup-e2e", "hook-index.json"))).toBe(true);
   });
 

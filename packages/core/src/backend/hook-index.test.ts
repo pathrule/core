@@ -85,3 +85,21 @@ describe("assembleHookIndex hot_paths (routing signal)", () => {
     ]);
   });
 });
+
+// The protocol field is the switch AND the payload: a workspace still compiling
+// the protocol into its companion files must not get it on the index, or the
+// agent reads it twice on the first prompt of every session.
+describe("assembleHookIndex protocol delivery", () => {
+  it("omits the field by default", () => {
+    expect(assembleHookIndex(baseInput({})).protocol).toBeUndefined();
+  });
+
+  it("carries the rendered protocol when the caller supplies one", () => {
+    const index = assembleHookIndex(baseInput({ protocol: "# Protocol\n\n1. do the thing" }));
+    expect(index.protocol).toBe("# Protocol\n\n1. do the thing");
+  });
+
+  it("treats a blank protocol as absent", () => {
+    expect(assembleHookIndex(baseInput({ protocol: "   \n " })).protocol).toBeUndefined();
+  });
+});

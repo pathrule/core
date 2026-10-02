@@ -15,7 +15,32 @@ export interface ProtocolBodyOptions {
   mode?: CompanionPayloadMode;
 }
 
+/**
+ * The signature block: everything Pathrule writes into a user-authored
+ * instruction file in `signature` mode.
+ *
+ * Three properties are load-bearing and none of them are cosmetic:
+ *   - it gives the agent NO orders and names NO tool, so a session with no
+ *     Pathrule attached reads nothing it cannot carry out (the failure that
+ *     produced "why is Claude Code editing my CLAUDE.md");
+ *   - it keeps a managed marker, so a re-render overwrites in place instead of
+ *     backing up the user's file (see paths/ownership.ts);
+ *   - it is identical for every client, so there is one string to review.
+ */
+export function renderCompanionSignature(): string {
+  return [
+    "<!-- Pathrule managed — do not edit; cloud state is authoritative. -->",
+    "",
+    "Pathrule is active in this workspace. Its memory, rules, and skills are delivered",
+    "per session by the Pathrule hook, so nothing else is compiled into this file.",
+    "This block is generated: remove Pathrule from this project with `pathrule eject`.",
+    "",
+  ].join("\n");
+}
+
 export function renderProtocolBody(_input: MultiClientInput, options: ProtocolBodyOptions): string {
+  if (options.mode === "signature") return renderCompanionSignature();
+
   const sections: string[] = [];
 
   // Marker line: lets safe-write.ts detect that an existing on-disk file is

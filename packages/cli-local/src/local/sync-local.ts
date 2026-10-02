@@ -21,9 +21,12 @@ import { join } from "node:path";
 import { LocalBackend, resolveLocalPrincipal } from "@pathrule/core";
 import {
   ensureClaudeSettingsHook,
-  renderProtocolRulesFile,
 } from "@pathrule/shared/pathrule-protocol.js";
 import { rerenderMultiClientLocal } from "@pathrule/shared/client-renderers/pipeline.js";
+import {
+  CLAUDE_PROTOCOL_FILE,
+  syncClaudeProtocolFile,
+} from "@pathrule/shared/client-renderers/claude-protocol-file.js";
 import { atomicWrite, readIfExists } from "@pathrule/shared/local-runtime/atomic-write.js";
 import {
   syncHookIndex,
@@ -116,25 +119,8 @@ export async function syncLocalWorkspace(
     }
   }
 
-  // 3. Static protocol rules file (backend-free render).
-  const protocolPath = ".claude/rules/pathrule-protocol.md";
-  try {
-    const absolute = join(cwd, protocolPath);
-    const body = renderProtocolRulesFile();
-    const existing = await readIfExists(absolute);
-    if (existing === body) {
-      files.skipped += 1;
-    } else {
-      await atomicWrite(absolute, body);
-      files.written += 1;
-    }
-    ownedPaths.add(protocolPath);
-  } catch (err) {
-    files.errors.push({
-      path: protocolPath,
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
+
+
 
   try {
     await recordManagedFileOwnership({
@@ -154,6 +140,11 @@ export async function syncLocalWorkspace(
   // knowledge files, then warm the offline hook-index from the same store.
   let companion: LocalSyncResult["companion"];
   let hookIndex: HookIndexSyncResult;
+  // The render takes the protocol-channel decision; the index writer below reuses
+  // it. Taking it twice is how the companion files and the hook index end up
+  // disagreeing, and the losing case of that disagreement is no protocol at all.
+  let protocol: string | undefined;
+  let teamContext: string | undefined;
   const backend = LocalBackend.openForWorkspace(workspaceId, env);
   try {
     const outcome = await rerenderMultiClientLocal({
@@ -164,7 +155,30 @@ export async function syncLocalWorkspace(
       userId: resolveLocalPrincipal(env),
       runtimeOwner: CLI_MANAGED_FILE_OWNER,
       runtimeVersion: CLI_VERSION,
+      env,
+      // Opted in: the syncHookIndex call below receives the same decision.
+      resolveChannel: true,
     });
+    protocol = outcome.protocolChannel?.protocol;
+    teamContext = outcome.teamContext;
+
+    // Claude Code's protocol copy: written, or REMOVED in signature mode.
+    // Removing is the half that is easy to forget. Nothing sweeps this path, so a
+    // copy left behind keeps reaching turn zero and drifts from the protocol the
+    // hook injects. Driven by the SAME decision the render just took, so the file
+    // and the index cannot disagree about which channel carries the protocol.
+    try {
+      const protocolFile = await syncClaudeProtocolFile(cwd, {
+        signed: protocol !== undefined,
+      });
+      if (protocolFile === "written") files.written += 1;
+      else files.skipped += 1;
+    } catch (err) {
+      files.errors.push({
+        path: CLAUDE_PROTOCOL_FILE,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
     companion = {
       ok: outcome.ok,
       enabled: outcome.enabled,
@@ -192,6 +206,8 @@ export async function syncLocalWorkspace(
       workspaceId,
       workspaceRoot: cwd,
       env,
+      protocol,
+      teamContext,
     });
   } catch (err) {
     hookIndex = {

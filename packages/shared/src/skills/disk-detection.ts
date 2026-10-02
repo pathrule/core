@@ -5,10 +5,15 @@
 // Node-only. Import directly from "@pathrule/shared/skills/disk-detection.js" —
 // do NOT re-export through the shared barrel (sandboxed preload + renderer).
 
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { constants as FS_CONSTS } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
+import {
+  HOOK_CONFIG_LOCATIONS,
+  configInstallsPathruleHook,
+} from "../client-renderers/hook-installed.js";
 import { AGENT_TARGETS, type AgentTargetId } from "./agent-targets.js";
 
 /**
@@ -154,4 +159,44 @@ export function withEngineTargets(
   const out = new Set<AgentTargetId>(enabled);
   for (const target of requiredTargetsForEngines(engines)) out.add(target);
   return [...out];
+}
+
+/**
+ * Which clients have Pathrule's HOOK installed for this workspace.
+ *
+ * Distinct from `detectClientsOnDisk`, and the difference is the whole point:
+ * that function answers "is this client wired into the workspace at all" from
+ * marker files, several of which Pathrule itself writes. This one answers "will
+ * something actually deliver the protocol at runtime", which only a real hook
+ * entry in the client's own config can prove.
+ *
+ * Read-only. Any failure resolves to NOT installed, because a wrong "installed"
+ * takes the protocol off disk with nothing replacing it, while a wrong "not
+ * installed" only leaves a file bigger than it needed to be.
+ */
+export async function detectInstalledHooks(
+  workspaceRoot: string,
+  opts: { home?: string } = {},
+): Promise<AgentTargetId[]> {
+  const home = opts.home ?? homedir();
+  const out: AgentTargetId[] = [];
+  for (const id of Object.keys(HOOK_CONFIG_LOCATIONS) as AgentTargetId[]) {
+    const locations = HOOK_CONFIG_LOCATIONS[id];
+    let installed = false;
+    for (const loc of locations) {
+      const base = loc.scope === "user" ? home : workspaceRoot;
+      let body: string;
+      try {
+        body = await readFile(join(base, loc.path), "utf8");
+      } catch {
+        continue;
+      }
+      if (configInstallsPathruleHook(body)) {
+        installed = true;
+        break;
+      }
+    }
+    if (installed) out.push(id);
+  }
+  return out;
 }

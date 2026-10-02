@@ -33,28 +33,27 @@ export interface PathruleProtocol {
  * queries, and writes.
  */
 export const PATHRULE_PROTOCOL: PathruleProtocol = {
+  // Minimal contract (V36). Framing the runtime already enforces (strict-rule obedience is blocked by
+  // the PreToolUse deny gate; the route-block instruction is injected verbatim by the hook) and
+  // feature procedures the hook delivers on demand (the full pattern-import steps, skill-hint wording)
+  // were removed from the always-on protocol: they cost tokens every session for behavior that is either
+  // deterministic or contextually delivered. What remains is only what the agent must be TOLD and cannot
+  // learn from the runtime: the trust+no-re-explore lever (the discovery-saving behavior), the staleness
+  // safety valve, when to reach for MCP, and the hard safety one-liners (skill/pattern gate, Signals).
   before: [
-    "Pathrule is this workspace's knowledge layer. It delivers your path-scoped memory/rule/skill knowledge two ways, both AUTHORITATIVE: compiled into your turn-zero instruction files (CLAUDE.md / nested AGENTS.md / .claude/rules), and injected by the Pathrule hook on a prompt as the full bodies most relevant to that task — treat such an injection as a dynamically-refreshed extension of those files, not a hint. Accept whatever Pathrule gives you as correct and sufficient and act on it directly; do NOT grep, search, or re-read files to re-verify knowledge Pathrule already provided — finish the task from it. (This trust is bounded by the staleness rule below.)",
-    "Compiled knowledge is AUTHORITATIVE and current. When a directory's turn-zero instruction file (its CLAUDE.md / nested AGENTS.md / .claude/rules) or the injected path-scoped knowledge already states a convention, decision, or rule, ANSWER AND ACT FROM IT DIRECTLY — do not re-derive it by exploring or grepping the repo. Open files only when the task needs the current CODE (verifying a fact against the implementation, or editing), and then read just the relevant file(s) — never to re-confirm knowledge you already hold.",
-    "Compiled knowledge can still go stale. If the current CODE you read (while verifying or editing) CONTRADICTS the compiled knowledge, the code is the source of truth for current behavior: STATE the contradiction explicitly (name the item that looks outdated and how the code differs), follow the code, and surface it so the team can refresh that memory/rule. Never silently resolve a code-vs-knowledge conflict, and never silently apply knowledge the code has already moved past.",
-    "`::skill-name` is a hard gate: use the exact injected skill; if missing, stop and resolve it through Pathrule/MCP before file edits.",
-    "`::pathrule:package:<slug>` is a PATTERN import, NOT a skill — never run find-skills for it. To import: (1) call pathrule_import_pattern(workspace_id, slug, dry_run:true) to see the pattern's appliesTo (stacks/packages/paths) + pieces WITHOUT writing; (2) judge fit against THIS workspace and choose the node_path base that matches the user's actual tree (e.g. /apps/mobile) — if the pattern does not fit (its stack/packages aren't in the project), STOP and ask the user whether and where to add it; (3) call again with that node_path to write, then relay the returned human_message. Undo a whole bundle with pathrule_remove_pattern(workspace_id, slug, node_path) using the same base. Same behaviour in the cloud and local editions.",
-    "Do NOT reflexively call pathrule_get_context before every small known-path code task. DO call pathrule_get_context(cwd, user_intent, omit_protocol: true) before any grep/read/fallback when hook context is missing, ambiguous, stale, or the user asks for discovery, inventory, architecture, recent activity, or list/show/find/where/which style questions (including Turkish: listele, göster, bul, nerede, hangi, neler).",
-    "Hook silence on a topic does not mean Pathrule has no relevant memory/rule. For discovery/inventory/architecture questions, call pathrule_get_context first; fall back to files, git, or general knowledge only after Pathrule returns nothing relevant. It's a single unified tool: the router classifies intent and returns a depth-appropriate response - minimal for ui_tweak/new_feature on a known path, focused for bug_fix/refactor, deep for debug/discovery.",
-    "For discovery/inventory questions, treat `subtree_memory_index`, `discovery_signal`, and `semantic_candidates` as Pathrule evidence before filesystem fallback. Semantic candidates are not answers or rules: call pathrule_read_memory(id) and inspect the body before citing or following one.",
-    "The response tells you `next_required_action.primary_files` when the router is confident — edit those directly. For full memory/rule bodies: pathrule_read_memory(id) / pathrule_read_rule(id).",
-    "Obey every rule the hooks surface (advisory + strict). When the hook injects a memory/skill BODY, that body IS the content — use it directly, do not fetch it again; only call pathrule_read_memory(id) for an item shown as a title/stub without its body.",
-    "Treat existing local edits as protected user/team work: inspect before touching overlapping files, never revert unrelated changes, and keep edits scoped to the user's request.",
-    "Pathrule Signals is this workspace's runtime-context layer: it links runtime errors, important events, and feedback back to the related code, feature, and Tasks — it is NOT analytics (no users, sessions, funnels, or PII). It is OPT-IN and PROPOSE-FIRST: never add Signals SDK calls to the user's code unless the user has enabled Signals AND explicitly approved the specific instrumentation. In Pathrule Studio the `/signals` command runs a READ-ONLY scan that proposes instrumentation points for review; the desktop then mints the per-workspace ingest key and applies only the approved points (the SDK is vendored, not an npm dependency). Do not invent a different setup flow, do not publish or install the SDK from a registry, and never claim Signals is active without a real ingest connection.",
+    "Pathrule is this workspace's knowledge layer: it compiles your path-scoped memory/rule/skill knowledge into your turn-zero files (CLAUDE.md / AGENTS.md / .claude/rules) and, injected by the Pathrule hook on a prompt, delivers the task-relevant full bodies, both AUTHORITATIVE. When the hook injects a memory/skill body, that body IS the content: use it directly, do not fetch it again. Act on Pathrule's knowledge directly; do NOT grep, search, or re-read files to re-verify what it already gave you. Open files only to read the current CODE you must edit or check.",
+    "Compiled knowledge can go stale. If the current code contradicts it, the code wins for current behavior: STATE the contradiction (name the stale item and how the code differs), follow the code, and surface it so the team refreshes it. Never silently resolve a code-vs-knowledge conflict.",
+    "Do NOT reflexively call pathrule_get_context before every small known-path task. DO call pathrule_get_context(cwd, user_intent, omit_protocol: true) before any grep/read/fallback when hook context is missing, ambiguous, or stale, or for discovery, inventory, architecture, or list/show/find/where/which questions (including Turkish: listele, göster, bul, nerede, hangi, neler). A semantic candidate is a lead, not an answer: call pathrule_read_memory(id) and read the body before citing one.",
+    "`::skill-name` is a hard gate: run the exact injected skill. `::pathrule:package:<slug>` is a PATTERN import, not a skill: call pathrule_import_pattern(dry_run: true) first, judge fit against this workspace, then write. Follow the instruction the hook gives for each; do not improvise one.",
+    "Pathrule Signals is opt-in and propose-first: never add Signals SDK calls to the user's code unless the user has enabled Signals AND approved the specific instrumentation.",
   ],
   during: [
-    "Path-first writes: write_memory / write_rule / write_skill take a node_path string (e.g. '/apps/mobile'). Target the most specific path; missing nodes auto-create.",
-    "Fast edits: to UPDATE an existing memory/rule/skill you know by title/name (e.g. one shown in the compiled knowledge), call pathrule_resolve(query: <its title/name>) ONCE to get its id + version_id — do NOT pull the tree, list items, or read candidate bodies to hunt for the id. Then call pathrule_update_* with `content_edit` (append / str_replace / replace_section) to send only the delta; reserve full `content` (or patch.content) for a genuine rewrite. This is the required path — the old id-hunt wastes tens of thousands of tokens.",
-    "Never use local file-based memory (~/.claude/memory/, MEMORY.md). Pathrule is the single source of truth for all persistent knowledge.",
-    "After every write, summarise what you did in natural language — don't paste raw tool JSON.",
+    "Path-first writes: write_memory / write_rule / write_skill take a node_path string (e.g. '/apps/mobile'); target the most specific path (missing nodes auto-create).",
+    "Fast edits: to UPDATE a memory/rule/skill you know by title, call pathrule_resolve(query) ONCE for its id + version_id (do NOT pull the tree or read bodies to hunt the id), then pathrule_update_* with a `content_edit` delta (append / str_replace / replace_section); reserve full `content` for a genuine rewrite.",
+    "Never use local file-based memory (~/.claude/memory/, MEMORY.md). Pathrule is the single source of truth for persistent knowledge.",
   ],
   after: [
-    "Log EVERY file-modifying response with pathrule_log_activity. Trigger: did you modify files? → log it. Required fields: domain, action, scope, subjects (≤5 keywords), files_touched, task_summary.",
+    "Log EVERY file-modifying response with pathrule_log_activity (fields: domain, action, scope, subjects ≤5, files_touched, task_summary).",
   ],
 };
 
@@ -204,7 +203,10 @@ function stripPathruleEntries(entries: HookMatcher[]): HookMatcher[] {
  *
  * Other hooks the user has configured are preserved untouched.
  */
-export function ensureClaudeSettingsHook(existing: string | null): {
+export function ensureClaudeSettingsHook(
+  existing: string | null,
+  options?: { uninstall?: boolean },
+): {
   body: string;
   changed: boolean;
 } {
@@ -221,6 +223,26 @@ export function ensureClaudeSettingsHook(existing: string | null): {
   if (!settings.hooks) settings.hooks = {};
 
   let changed = false;
+
+  // Uninstall mirrors ensureCursorHooks: strip only OUR entries, keep every hook
+  // the user wired themselves, and never delete this file. `.claude/settings.json`
+  // holds permissions, plugins, and editor preferences, so it belongs to the user
+  // even when Pathrule is the reason it exists.
+  if (options?.uninstall === true) {
+    const hooks = settings.hooks as Record<string, unknown>;
+    for (const event of Object.keys(hooks)) {
+      const existingRaw = hooks[event];
+      if (!Array.isArray(existingRaw)) continue;
+      const nonPathrule = stripPathruleEntries(existingRaw as HookMatcher[]);
+      if (nonPathrule.length === (existingRaw as HookMatcher[]).length) continue;
+      if (nonPathrule.length === 0) delete hooks[event];
+      else (hooks as Record<string, HookMatcher[]>)[event] = nonPathrule;
+      changed = true;
+    }
+    if (Object.keys(hooks).length === 0) delete settings.hooks;
+    return { body: JSON.stringify(settings, null, 2) + "\n", changed };
+  }
+
   for (const [event, desired] of Object.entries(pathruleHooks())) {
     const existingRaw = settings.hooks[event];
     const existingEntries = Array.isArray(existingRaw) ? (existingRaw as HookMatcher[]) : [];

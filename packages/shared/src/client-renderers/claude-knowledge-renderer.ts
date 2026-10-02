@@ -31,6 +31,26 @@ const knowledgePath = (dirPath: string, _slug: string): string =>
   `${dirRelative(dirPath)}/CLAUDE.md`;
 
 function renderClaudeKnowledge(input: MultiClientInput): RenderedFile[] {
+  // Signature mode: write nothing into the user's tree.
+  //
+  // The measured complaint was never the token cost — it was 26 Pathrule-authored
+  // files across 13 directories of a checkout the team owns. Removing the
+  // protocol copy alone left 25 of them, because this renderer never read
+  // `companionMode`: signature ON and OFF produced byte-identical output.
+  //
+  // Returning no files while `ownedPaths` stays complete is what makes the
+  // removal happen rather than merely stopping: disk-writer sweeps every owned
+  // path this run did not emit, and it already refuses to delete a file without a
+  // Pathrule marker and retracts only the region from one the user shares. The
+  // alternative — narrowing ownedPaths too — is how `pathrule-protocol.md` ended
+  // up needing its own bespoke remover.
+  //
+  // What the files carried still reaches the agent: knowledge through the hook's
+  // per-prompt selection (measured 2026-09-01: +673 tokens over 20 turns, +5%,
+  // because the hook was already ranking the same items), and the team context
+  // block through the hook index, which is where `index.team_context` comes from.
+  if (input.companionMode === "signature") return [];
+
   const files: RenderedFile[] = [];
   const root = rootKnowledge(input);
   if (root) {

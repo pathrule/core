@@ -62,6 +62,40 @@ function classifySqlState(code: string): FailureClass | null {
   return null;
 }
 
+/**
+ * The server answered, but the relation, function, or column the request names does not
+ * exist on it (yet).
+ *
+ * PostgREST reports these as its own `PGRST20x` "not in the schema cache" codes, which are
+ * eight characters and so never pass the SQLSTATE shape test: before this they read as
+ * `unknown`, which is transient, and a queue that stops a pass on a transient failure let
+ * one write aimed at a table this deployment does not have block every write behind it.
+ * The SQLSTATE forms (42P01 undefined_table, 42883 undefined_function, 42703
+ * undefined_column) arrive when the same gap is hit from inside a function.
+ *
+ * Neither "retry now" nor "give up" is right for this. The usual cause is a client that
+ * shipped ahead of its migration (or an older server behind a newer app), and it resolves
+ * itself when the other side catches up, so the queue parks the write rather than
+ * retrying it in a loop or holding it as a refusal. classifyError deliberately leaves the
+ * PGRST forms `unknown`: a READ that hits one should keep falling back to the local
+ * mirror, which is the more useful answer there. Only callers that stop on transient
+ * failures need to ask this first.
+ */
+const MISSING_SCHEMA_CODES = new Set([
+  "PGRST202",
+  "PGRST204",
+  "PGRST205",
+  "42P01",
+  "42883",
+  "42703",
+]);
+
+export function isMissingSchemaFailure(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && MISSING_SCHEMA_CODES.has(code);
+}
+
 export function classifyError(err: unknown): FailureClass {
   if (err === null || err === undefined) return "unknown";
 

@@ -53,7 +53,7 @@ function knowledgeFrontmatter(dirPath: string): string {
 
 function renderCursor(input: MultiClientInput): RenderedFile[] {
   let body =
-    renderProtocolBody(input, { toolLabel: "Cursor", mode: "slim" }) +
+    renderProtocolBody(input, { toolLabel: "Cursor", mode: input.companionMode ?? "slim" }) +
     "\n" +
     renderCwdGuardrail("Cursor");
 

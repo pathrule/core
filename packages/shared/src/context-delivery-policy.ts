@@ -1,4 +1,14 @@
-export type CompanionPayloadMode = "slim";
+/**
+ * How much of Pathrule goes into the user's companion instruction files.
+ *
+ * - `slim`   — today's default: the agent protocol plus the context policy is
+ *              compiled into the file.
+ * - `signature` — the file carries three lines that say Pathrule is active and
+ *              nothing else. The protocol travels on the hook index and is
+ *              injected once per session, so a client with no Pathrule attached
+ *              never reads an instruction it cannot carry out.
+ */
+export type CompanionPayloadMode = "slim" | "signature";
 
 export type InjectionSurface = "session_start" | "prompt" | "pre_tool" | "post_tool" | "mcp";
 

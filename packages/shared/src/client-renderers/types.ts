@@ -5,6 +5,7 @@
 import type { CompiledKnowledgeNode } from "@pathrule/core";
 import type { WorkspaceOverviewNode } from "../tools/tree.js";
 import type { TeamContextBlock } from "./team-context-block.js";
+import type { CompanionPayloadMode } from "../context-delivery-policy.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Promoted Rules Bundle
@@ -53,6 +54,14 @@ export interface PromotedRulesBundle {
 export interface MultiClientInput {
   workspaceName: string;
   overview: WorkspaceOverviewNode[];
+  /**
+   * How much Pathrule writes into this client's instruction file. Set PER CLIENT
+   * by the orchestrator (same mechanism as the slim-knowledge swap), because the
+   * answer is a client capability: a client whose hook delivers the protocol
+   * gets `signature`, a client that cannot run one keeps `slim` so it never
+   * loses the protocol. Absent ⇒ `slim`, i.e. today's output.
+   */
+  companionMode?: CompanionPayloadMode;
   /** Promoted rules bundle; undefined when feature flag is off or no promoted rules exist. */
   promotedRules?: PromotedRulesBundle;
   /**

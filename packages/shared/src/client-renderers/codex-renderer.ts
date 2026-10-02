@@ -39,7 +39,7 @@ const knowledgePath = (dirPath: string, _slug: string): string =>
   `${dirRelative(dirPath)}/AGENTS.md`;
 
 function renderCodex(input: MultiClientInput): RenderedFile[] {
-  let body = renderProtocolBody(input, { toolLabel: "Codex", mode: "slim" });
+  let body = renderProtocolBody(input, { toolLabel: "Codex", mode: input.companionMode ?? "slim" });
 
   // Inject promoted_rules section (client-neutral, same content as all other clients).
   if (input.promotedRules) {

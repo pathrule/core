@@ -24,7 +24,7 @@ const knowledgePath = (_dirPath: string, slug: string): string =>
   `.windsurf/rules/pathrule-k-${slug}.md`;
 
 function renderWindsurf(input: MultiClientInput): RenderedFile[] {
-  let body = renderProtocolBody(input, { toolLabel: "Windsurf", mode: "slim" });
+  let body = renderProtocolBody(input, { toolLabel: "Windsurf", mode: input.companionMode ?? "slim" });
 
   // Inject promoted_rules section (client-neutral, same content as all other clients).
   if (input.promotedRules) {

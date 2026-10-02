@@ -76,17 +76,15 @@ export function matchMemoriesForPath(
 }
 
 /**
- * Collect rules that apply to `relativePath`. Combines:
- *   - folder-scoped rules on any ancestor path
- *   - project-scoped rules (always in effect)
- * Deduplicated, priority-sorted (high → medium → low), closer matches first.
+ * Every rule whose SCOPE covers `relativePath`: folder-scoped rules on any ancestor
+ * path, plus project-scoped rules (always in effect). Deduplicated, path-closest
+ * first, then project rules.
+ *
+ * Applicability lives here once, on purpose. Enforcement and context both need the
+ * same answer to "does this rule apply?", and two walks would eventually disagree
+ * about it.
  */
-export function matchRulesForPath(
-  index: HookIndex,
-  relativePath: string,
-  opts: MatchOptions = {},
-): RuleStub[] {
-  const limit = opts.limit ?? 5;
+function collectApplicableRules(index: HookIndex, relativePath: string): RuleStub[] {
   const seen = new Set<string>();
   const results: RuleStub[] = [];
 
@@ -106,11 +104,56 @@ export function matchRulesForPath(
     results.push(r);
   }
 
+  return results;
+}
+
+/**
+ * Rules to SHOW for `relativePath`: priority-sorted (high → medium → low) and cut to
+ * the context budget. This is a display decision, and the cut is the point of it.
+ */
+export function matchRulesForPath(
+  index: HookIndex,
+  relativePath: string,
+  opts: MatchOptions = {},
+): RuleStub[] {
+  const limit = opts.limit ?? 5;
+  const results = collectApplicableRules(index, relativePath);
+
   // Stable priority sort: high first. The walk already preserved path-closeness.
   const priorityRank: Record<RuleStub["priority"], number> = { high: 0, medium: 1, low: 2 };
   results.sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
 
   return results.slice(0, limit);
+}
+
+/**
+ * Rules to CHECK an Edit/Write against: every applicable rule carrying a compiled
+ * constraint. Unbudgeted and unsorted, and that is the whole point.
+ *
+ * `matchRulesForPath` exists to bound how much text gets injected, so it ranks by
+ * priority and truncates. Feeding the deny check from that list made enforcement a
+ * function of the display budget: a medium-priority strict rule that lost the priority
+ * race was never regex-tested, so an approved constraint silently stopped blocking.
+ * Measured on rule 33 (`Never use cursor: pointer`): position 28 of 34 candidates
+ * against a limit of 12, and position 19 of 25 project rules alone, so NO path in that
+ * workspace could reach the check.
+ *
+ * The `filterRulesByRelevance` bypass at "enforcement === strict → always keep" does
+ * not save it: that exempts strict rules from the relevance filter, which runs AFTER
+ * this cut.
+ *
+ * No limit here. A cap is exactly what broke it, and the set is self-limiting: a rule
+ * only enters it by carrying a trusted, active constraint that compiled.
+ *
+ * Either compiled half admits a rule. `block_path` is the half for a constraint whose
+ * subject is WHERE a file is rather than what it contains, so requiring a content
+ * pattern here would make every path-only atom invisible to this side while
+ * pathrule-hook.js still denied on it, which is the one divergence that must not exist.
+ */
+export function matchEnforcementRulesForPath(index: HookIndex, relativePath: string): RuleStub[] {
+  return collectApplicableRules(index, relativePath).filter(
+    (r) => r.enforcement === "strict" && (r.block_pattern != null || r.block_path != null),
+  );
 }
 
 /**

@@ -6,6 +6,7 @@
 // Node-only: imports from `./disk-writer.js` which uses fs.
 
 import type { KnowledgeBackend } from "@pathrule/core";
+import { renderTeamContextBlock } from "./team-context-block.js";
 
 import type { AgentTargetId } from "../skills/agent-targets.js";
 import {
@@ -22,6 +23,11 @@ import {
   type ClientRenderResult,
 } from "./orchestrator.js";
 import { writeMultiClientFiles, type DiskWriteResult } from "./disk-writer.js";
+import { sweepPathruleOwnLeftovers } from "./legacy-sweep.js";
+import {
+  resolveWorkspaceProtocolChannel,
+  type WorkspaceProtocolChannel,
+} from "./protocol-channel-fs.js";
 import type { MultiClientInput } from "./types.js";
 
 // Historically only non-Claude clients flowed through this pipeline (the root
@@ -71,6 +77,27 @@ export interface RerenderOutcome {
   enabled: AgentTargetId[];
   results: ClientRenderResult[];
   disk: DiskWriteResult;
+  /**
+   * The protocol-channel decision this render used, returned so the caller hands
+   * the SAME one to syncHookIndex. The two writers disagreeing is the only
+   * failure mode that loses the protocol entirely, so the decision travels with
+   * the render instead of being taken twice.
+   */
+  protocolChannel?: WorkspaceProtocolChannel;
+  /**
+   * The rendered team-context block, present only when this render was in
+   * signature mode — i.e. exactly when the compiled file that used to carry it
+   * was not written. Returned for the same reason as `protocolChannel`: the
+   * caller hands it to syncHookIndex, so the file half and the index half of one
+   * decision cannot disagree.
+   */
+  teamContext?: string;
+  /**
+   * What the one-time legacy sweep removed, and what it left for the user.
+   * Present only on the sync that actually ran it (once per workspace per
+   * process). Reported so a deletion in the user's tree is never silent.
+   */
+  legacySweep?: { removed: string[]; held: string[] };
   error?: string;
 }
 
@@ -92,6 +119,23 @@ export interface RerenderLocalArgs {
    * non-Studio caller (CLI, MCP) that knows no engine is running.
    */
   activeEngines?: readonly string[];
+  /**
+   * Process env, read only for the signature-mode rollout switch. Omitted falls
+   * back to `process.env`, which is what every real caller wants; tests pass it
+   * explicitly so the switch is never ambient.
+   */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Resolve the protocol channel for this render, and return the decision.
+   *
+   * OFF by default, and that default is a safety property rather than caution.
+   * The decision has two halves: this render writes the files, and the caller
+   * must hand the same decision to `syncHookIndex`. A caller that renders with a
+   * signature but never passes the protocol on produces a workspace where the
+   * protocol reaches the agent through NO channel. So a caller opts in only once
+   * it carries both halves.
+   */
+  resolveChannel?: boolean;
 }
 
 /**
@@ -125,7 +169,20 @@ export async function rerenderMultiClientLocal(args: RerenderLocalArgs): Promise
       workspaceName: args.workspaceName,
       userId: args.userId,
     });
-    const results = renderForClients(input, targets);
+    const protocolChannel = args.resolveChannel
+      ? await resolveWorkspaceProtocolChannel({
+          workspaceRoot: args.workspaceRoot,
+          enabled: targets,
+          env: args.env,
+        })
+      : undefined;
+    // Deliberately NOT gated on signature mode: these leftovers are the residue
+    // of a fixed bug, not part of the new channel, and expecting the user to run
+    // eject to clean up after us is a chore we invented for them.
+    const sweep = await sweepPathruleOwnLeftovers(args.workspaceRoot);
+    const results = renderForClients(input, targets, {
+      protocolOnHook: protocolChannel?.signatureClients,
+    });
     const disk = await writeMultiClientFiles({
       workspaceRoot: args.workspaceRoot,
       results,
@@ -133,7 +190,18 @@ export async function rerenderMultiClientLocal(args: RerenderLocalArgs): Promise
       runtimeOwner: args.runtimeOwner,
       runtimeVersion: args.runtimeVersion,
     });
-    return { ok: true, enabled, results, disk };
+    return {
+      ok: true,
+      enabled,
+      results,
+      disk,
+      protocolChannel,
+      teamContext:
+        protocolChannel && protocolChannel.signatureClients.length > 0
+          ? (renderTeamContextBlock(input.teamContext) ?? undefined)
+          : undefined,
+      legacySweep: sweep.ran ? { removed: sweep.removed, held: sweep.held } : undefined,
+    };
   } catch (err) {
     return {
       ok: false,

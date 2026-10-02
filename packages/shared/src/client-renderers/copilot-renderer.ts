@@ -55,7 +55,7 @@ function scopedPointerBody(): string {
 
 function renderCopilot(input: MultiClientInput): RenderedFile[] {
   let body =
-    renderProtocolBody(input, { toolLabel: "GitHub Copilot", mode: "slim" }) +
+    renderProtocolBody(input, { toolLabel: "GitHub Copilot", mode: input.companionMode ?? "slim" }) +
     "\n" +
     renderCwdGuardrail("Copilot");
 

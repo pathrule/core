@@ -15,6 +15,7 @@
  * Pure and deterministic: same input, same bytes. No I/O, no clock.
  */
 import type { HookIndexInput } from "./hook-index.js";
+import { compiledDeliveryPlan, deliveredMemoryBody } from "./compiled-delivery.js";
 import { isDirectoryLeafName } from "../paths/leaf-type.js";
 
 /** Per-directory budget for compiled knowledge (chars ≈ tokens × 4). */
@@ -105,12 +106,15 @@ export function assembleKnowledgeNodes(
       });
     }
   }
+  // A memory the completeness gate cleared is compiled into the file as its compiled form, exactly
+  // as the hook's body channel delivers it; every other memory goes in as written.
+  const plan = compiledDeliveryPlan(input);
   for (const m of input.memories) {
     const { dir, leaf } = toDirPath(m.node_path);
     bucket(dir).memories.push({
       id: m.id,
       title: leaf ? `${m.title} (${leaf})` : m.title,
-      content: m.content,
+      content: deliveredMemoryBody(m, plan),
       at: leaf,
     });
   }

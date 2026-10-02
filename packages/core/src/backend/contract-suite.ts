@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
 import type { NodeBrief } from "@pathrule/shared/intelligence/types.js";
-import type { KnowledgeBackend } from "./knowledge-backend.js";
+import type { KnowledgeBackend, LocalKnowledgeBackend } from "./knowledge-backend.js";
 import type { EmbedFn } from "./embedding-adapter.js";
+import type { RuleConstraint } from "@pathrule/shared/knowledge/constraint.js";
+import type { RuleCheck } from "@pathrule/shared/knowledge/check.js";
+import type { RuleAtom } from "@pathrule/shared/knowledge/atoms.js";
+import { isRemedyDeliverable, validateRemedyInput } from "@pathrule/shared/knowledge/remedy.js";
+import { stampProposedRemedy } from "@pathrule/shared/knowledge/remedy-fingerprint.js";
+import type { RuleStub } from "@pathrule/shared/hook-supervisor/types.js";
 
 /**
  * Deterministic embedding stub for the parity suite. Maps text to a 3-dim
@@ -29,9 +35,10 @@ export const CONTRACT_TEST_EMBED: EmbedFn = (text) => {
  */
 export function runKnowledgeBackendContract(
   label: string,
-  makeBackend: () => KnowledgeBackend,
+  makeBackend: () => LocalKnowledgeBackend,
 ): void {
   const WS = "ws-1";
+  const NOW_ISO = "2026-09-03T00:00:00.000Z";
 
   describe(`KnowledgeBackend contract — ${label}`, () => {
     describe("memory", () => {
@@ -124,6 +131,448 @@ export function runKnowledgeBackendContract(
         const del = await b.deleteRule({ id: r.id });
         expect(del.status).toBe("deleted");
         expect(await b.readRule(r.id)).toBeNull();
+      });
+
+      // ── executable CONSTRAINT atoms ─────────────────────────────────────
+      //
+      // Runs against every edition, which is the point. A constraint that compiles
+      // to a deny in one edition and not another is worse than no constraint: the
+      // same edit would be blocked or allowed depending on where the index was
+      // built, and that is an indicator that cannot separate two cases with
+      // opposite fixes.
+      //
+      // `EXPECTED_BLOCK_PATTERN` is the compiled output MEASURED from the cloud SQL
+      // builder for this exact input (rule 33, `Never use cursor: pointer`). It is a
+      // golden, not a guess: if the TS projection drifts from what the cloud
+      // produces, these assertions fail here rather than in production.
+      const CONSTRAINT_MESSAGE =
+        "Use a real <button> or <a>; they carry the pointer cursor and the semantics.";
+      const EXPECTED_BLOCK_PATTERN = {
+        source: "cursor:\\s*pointer",
+        flags: "i",
+        message: CONSTRAINT_MESSAGE,
+      };
+      const atom = (over: Partial<RuleConstraint> = {}): RuleConstraint => ({
+        id: "c-1",
+        mode: "forbid",
+        match: { kind: "regex", pattern: "cursor:\\s*pointer", flags: "i" },
+        message: CONSTRAINT_MESSAGE,
+        authority: "human",
+        status: "active",
+        created_at: NOW_ISO,
+        approved_by: "u-1",
+        ...over,
+      });
+
+      /**
+       * The seeded rule body. Named because the grounding gate makes it load-bearing:
+       * a compiler-verified atom only compiles while this text still contains the excerpt
+       * it was proved against.
+       */
+      const RULE_BODY = "Never apply `cursor: pointer` to a div. Use a real button or anchor.";
+      const SOURCE_EXCERPT = "Never apply `cursor: pointer` to a div.";
+
+      async function seedConstrainedRule(
+        b: KnowledgeBackend,
+        // The union: one rule can carry a constraint and a check, and the read-append-write
+        // path losing one of them is the failure this suite exists to catch.
+        constraints: RuleAtom[],
+        content: string = RULE_BODY,
+      ): Promise<string> {
+        const node = await b.ensureNodeForPath(WS, "/ui");
+        const r = await b.writeRule({
+          workspaceId: WS,
+          nodeId: node.id,
+          name: "Never use cursor: pointer",
+          content,
+          scopeType: "project",
+          constraints,
+        });
+        return r.id;
+      }
+
+      async function projectRuleStub(b: KnowledgeBackend, ruleId: string): Promise<RuleStub | undefined> {
+        const index = await b.buildHookIndexPayload(WS);
+        const all: RuleStub[] = [
+          ...(index?.project_rules ?? []),
+          ...Object.values(index?.path_rules ?? {}).flat(),
+        ];
+        return all.find((r) => r.id === ruleId);
+      }
+
+      it("persists constraint atoms verbatim through write → read → list", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [atom()]);
+        expect((await b.readRule(id))?.constraints).toEqual([atom()]);
+        const listed = (await b.listRules({ workspaceId: WS })).find((r) => r.id === id);
+        expect(listed?.constraints).toEqual([atom()]);
+      });
+
+      it("omits the field entirely when a rule has no constraints", async () => {
+        const b = makeBackend();
+        const node = await b.ensureNodeForPath(WS, "/plain");
+        const r = await b.writeRule({
+          workspaceId: WS,
+          nodeId: node.id,
+          name: "plain",
+          content: "x",
+          scopeType: "project",
+        });
+        // Not `[]`: an empty list and "this edition stores none" must read the same,
+        // or the cross-edition shape comparison starts reporting false divergence.
+        expect(r.constraints).toBeUndefined();
+        expect((await b.readRule(r.id))?.constraints).toBeUndefined();
+      });
+
+      it("compiles a human/active atom into the hook-index stub", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [atom()]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("does NOT compile a proposed atom, and leaves the stub unenforced", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          atom({ authority: "inferred", status: "proposed", approved_by: null }),
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_pattern).toBeUndefined();
+        // "advisory", not absent: the cloud SQL builder emits the key unconditionally,
+        // and an omitted key here made the two editions differ on a field the deny gate
+        // reads. Measured against the live builder, not assumed.
+        expect(stub?.enforcement).toBe("advisory");
+      });
+
+      it("needs both halves of the gate", async () => {
+        const b = makeBackend();
+        const halfA = await seedConstrainedRule(b, [atom({ authority: "inferred" })]);
+        expect((await projectRuleStub(b, halfA))?.block_pattern).toBeUndefined();
+        const b2 = makeBackend();
+        const halfB = await seedConstrainedRule(b2, [atom({ status: "proposed" })]);
+        expect((await projectRuleStub(b2, halfB))?.block_pattern).toBeUndefined();
+      });
+
+      it("carries a constraint update and keeps it when the patch omits it", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          atom({ authority: "inferred", status: "proposed", approved_by: null }),
+        ]);
+        expect((await projectRuleStub(b, id))?.block_pattern).toBeUndefined();
+
+        // Approval: the same atom, promoted.
+        await b.updateRule({ id, constraints: [atom()] });
+        expect((await projectRuleStub(b, id))?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+
+        // An unrelated patch must not silently disarm it.
+        await b.updateRule({ id, priority: "high" });
+        expect((await b.readRule(id))?.constraints).toEqual([atom()]);
+        expect((await projectRuleStub(b, id))?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("compiles a compiler-VERIFIED constraint with no human approval", async () => {
+        // The AUTO path: authority "verified" means the deterministic compiler built the
+        // representation and both oracles passed. Every edition must honour it, or the
+        // same atom would enforce on one machine and not another.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          {
+            ...atom(),
+            authority: "verified",
+            approved_by: null,
+            grounding: { source_text: SOURCE_EXCERPT },
+          },
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("compiles a PATH-ONLY constraint, with no block_pattern at all", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          {
+            id: "c-path",
+            mode: "forbid" as const,
+            path: { scope_path: "/packages/mobile/Pathrule", file_extensions: [".md"] },
+            message: "Scope mobile knowledge at /packages/mobile, never under Pathrule/.",
+            authority: "verified" as const,
+            status: "active" as const,
+            created_at: NOW_ISO,
+            approved_by: null,
+            grounding: { source_text: SOURCE_EXCERPT },
+          },
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toBeUndefined();
+        expect(stub?.block_path).toEqual({
+          scope_path: "/packages/mobile/Pathrule",
+          file_extensions: [".md"],
+          message: "Scope mobile knowledge at /packages/mobile, never under Pathrule/.",
+        });
+      });
+
+      // ── grounding integrity ─────────────────────────────────────────────
+      //
+      // A compiler-verified atom's authority is a proof about a PAIR: this representation,
+      // that prose. Rule bodies are rewritten from at least five production paths, and
+      // only one of them (the MCP update handler) knows constraints exist. So the
+      // guarantee cannot live in the mutation paths — it lives here, at the single gate
+      // every edition's index build goes through, and it is re-proved on every build.
+      const groundedAtom = (over: Partial<RuleConstraint> = {}): RuleConstraint => ({
+        ...atom(),
+        authority: "verified",
+        approved_by: null,
+        grounding: { source_text: SOURCE_EXCERPT },
+        ...over,
+      });
+
+      it("stops enforcing when a BYPASS mutation path rewrites the body out from under it", async () => {
+        // The acceptance case. `backend.updateRule({ content })` is what
+        // packages/vscode/src/fs/content-store.ts, the maintenance proposal applier and
+        // its rollback builder all call: the atom list is untouched, so the stale
+        // representation is still stored as verified/active. It must not reach runtime.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [groundedAtom()]);
+        expect((await projectRuleStub(b, id))?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+
+        await b.updateRule({ id, content: "`cursor: pointer` is allowed now. Use it freely." });
+
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_pattern).toBeUndefined();
+        expect(stub?.enforcement).toBe("advisory");
+        // And the DB state is deliberately untouched: the atom still reads verified/active.
+        // The invariant is held by the projection, not by every writer remembering to
+        // demote — which is exactly what makes it hold for a writer nobody has written yet.
+        expect((await b.readRule(id))?.constraints?.[0]?.status).toBe("active");
+      });
+
+      it("keeps enforcing when the body grows a paragraph that leaves the source intact", async () => {
+        // The other half of the same property. Invalidation sensitive enough that editing
+        // a rule disarms it teaches people not to edit rules, which costs more than it saves.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [groundedAtom()]);
+        await b.updateRule({
+          id,
+          content: `${RULE_BODY}\n\nAlso prefer a hover background to an opacity change.`,
+        });
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("stops enforcing when only the grounding sentence is edited", async () => {
+        // Semantic grounding loss, with the rest of the rule untouched. The excerpt the
+        // representation was proved against is gone, so the proof is gone with it.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [groundedAtom()]);
+        await b.updateRule({
+          id,
+          content: "Prefer a real button to a div. Use a real button or anchor.",
+        });
+        expect((await projectRuleStub(b, id))?.block_pattern).toBeUndefined();
+      });
+
+      it("refuses a verified atom that carries no proof at all", async () => {
+        // Fail-safe. An atom claiming compiler authority with nothing to re-prove cannot
+        // be re-proved, and an unprovable claim compiles to nothing rather than to trust.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          { ...atom(), authority: "verified", approved_by: null },
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_pattern).toBeUndefined();
+        expect(stub?.enforcement).toBe("advisory");
+      });
+
+      it("holds the gate on a PATH-ONLY verified atom too", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          {
+            id: "c-path",
+            mode: "forbid" as const,
+            path: { scope_path: "/packages/mobile/Pathrule", file_extensions: [".md"] },
+            message: "Scope mobile knowledge at /packages/mobile, never under Pathrule/.",
+            authority: "verified" as const,
+            status: "active" as const,
+            created_at: NOW_ISO,
+            approved_by: null,
+            grounding: { source_text: SOURCE_EXCERPT },
+          },
+        ]);
+        expect((await projectRuleStub(b, id))?.block_path).toBeDefined();
+        await b.updateRule({ id, content: "Pointer cursors are fine now." });
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_path).toBeUndefined();
+        expect(stub?.enforcement).toBe("advisory");
+      });
+
+      it("leaves a HUMAN-approved atom enforcing whatever the body says", async () => {
+        // Its authority came from a person, not from this prose. Revoking it on a prose
+        // edit would be inventing a policy nobody asked for, so the gate does not reach it.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [atom()]);
+        await b.updateRule({ id, content: "`cursor: pointer` is allowed now." });
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("picks a grounded atom over a stale one rather than being shadowed by it", async () => {
+        // Grounding belongs in the SELECTION predicate. Filter after picking a winner and
+        // a stale atom listed first turns a rule that should still enforce into one that
+        // does not — a silent downgrade, which is the failure mode this whole slice avoids.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          groundedAtom({ id: "c-stale", grounding: { source_text: "prose that is long gone" } }),
+          groundedAtom({ id: "c-live" }),
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+      });
+
+      it("drops an atom with neither a pattern nor a path", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          {
+            id: "c-empty",
+            mode: "forbid" as const,
+            message: "This forbids nothing at all, so it must not compile.",
+            authority: "verified" as const,
+            status: "active" as const,
+            created_at: NOW_ISO,
+            approved_by: null,
+            grounding: { source_text: SOURCE_EXCERPT },
+          } as never,
+        ]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.block_pattern).toBeUndefined();
+        expect(stub?.block_path).toBeUndefined();
+      });
+
+      // ── CHECK atoms, in the same list ───────────────────────────────────
+      //
+      // The compiled output is MEASURED from the cloud SQL builder for this exact input.
+      // A check that compiles in one edition and not another would hold a turn open on
+      // one machine and let it close on another.
+      const CHECK_MESSAGE =
+        "Behaviour changed under packages/shared, so its suite has to pass before this is done.";
+      const EXPECTED_CHECK = {
+        scope_path: "/packages/shared",
+        command: "pnpm --filter @pathrule/shared test",
+        fingerprint: "pnpm:test@package:@pathrule/shared",
+        message: CHECK_MESSAGE,
+      };
+      const checkAtom = (over: Partial<RuleCheck> = {}): RuleCheck => ({
+        id: "chk-1",
+        kind: "check",
+        scope_path: "/packages/shared",
+        requires: {
+          kind: "command",
+          command: "pnpm --filter @pathrule/shared test",
+          fingerprint: "pnpm:test@package:@pathrule/shared",
+        },
+        message: CHECK_MESSAGE,
+        authority: "human",
+        status: "active",
+        created_at: NOW_ISO,
+        approved_by: "u-1",
+        ...over,
+      });
+
+      it("compiles a human/active check into the stub", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [checkAtom()]);
+        expect((await projectRuleStub(b, id))?.required_check).toEqual(EXPECTED_CHECK);
+      });
+
+      it("does NOT compile a proposed check", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          checkAtom({ authority: "inferred", status: "proposed", approved_by: null }),
+        ]);
+        expect((await projectRuleStub(b, id))?.required_check).toBeUndefined();
+      });
+
+      it("needs both halves of the check gate", async () => {
+        const a = makeBackend();
+        const idA = await seedConstrainedRule(a, [checkAtom({ authority: "inferred" })]);
+        expect((await projectRuleStub(a, idA))?.required_check).toBeUndefined();
+        const b = makeBackend();
+        const idB = await seedConstrainedRule(b, [checkAtom({ status: "proposed" })]);
+        expect((await projectRuleStub(b, idB))?.required_check).toBeUndefined();
+      });
+
+      it("carries a constraint and a check on one rule without losing either", async () => {
+        // The read-append-write path is where the other kind gets silently deleted.
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [atom(), checkAtom()]);
+        const stored = (await b.readRule(id))?.constraints ?? [];
+        expect(stored.map((x) => x.id)).toEqual(["c-1", "chk-1"]);
+        const stub = await projectRuleStub(b, id);
+        expect(stub?.enforcement).toBe("strict");
+        expect(stub?.block_pattern).toEqual(EXPECTED_BLOCK_PATTERN);
+        expect(stub?.required_check).toEqual(EXPECTED_CHECK);
+      });
+
+      it("round-trips an authoring-time resolution and keeps it out of the stub", async () => {
+        // Additive field, so every edition must preserve it on read (or a write-back
+        // deletes it) while the compiled stub stays byte-identical: resolution is
+        // provenance for the approver, never a runtime authority.
+        const b = makeBackend();
+        const resolved = {
+          status: "resolved" as const,
+          runs: "vitest run",
+          chain: ["pnpm --filter @pathrule/shared test", "@pathrule/shared:test = vitest run"],
+          reason: null,
+        };
+        const id = await seedConstrainedRule(b, [
+          { ...checkAtom(), requires: { ...checkAtom().requires, resolved } },
+        ]);
+        const stored = (await b.readRule(id))?.constraints?.[0] as
+          | { requires?: { resolved?: unknown } }
+          | undefined;
+        expect(stored?.requires?.resolved).toEqual(resolved);
+        expect(await projectRuleStub(b, id).then((x) => x?.required_check)).toEqual(EXPECTED_CHECK);
+      });
+
+      it("refuses to compile a stored check whose resolution proved non-terminating", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          {
+            ...checkAtom(),
+            requires: {
+              ...checkAtom().requires,
+              resolved: { status: "non_terminating" as const, runs: "vitest", chain: [], reason: "watches" },
+            },
+          },
+        ]);
+        expect((await projectRuleStub(b, id))?.required_check).toBeUndefined();
+      });
+
+      it("drops a check whose fingerprint no longer matches its command", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          checkAtom({
+            requires: {
+              kind: "command",
+              command: "pnpm --filter @pathrule/shared test",
+              fingerprint: "pnpm:test@package:@pathrule/core",
+            },
+          }),
+        ]);
+        expect((await projectRuleStub(b, id))?.required_check).toBeUndefined();
+      });
+
+      it("drops a malformed stored atom rather than enforcing it", async () => {
+        const b = makeBackend();
+        const id = await seedConstrainedRule(b, [
+          { ...atom(), authority: "sudo" } as unknown as RuleConstraint,
+        ]);
+        expect((await b.readRule(id))?.constraints).toBeUndefined();
+        expect((await projectRuleStub(b, id))?.block_pattern).toBeUndefined();
       });
 
       it("rule write without a node stays unattached", async () => {
@@ -865,6 +1314,97 @@ export function runKnowledgeBackendContract(
         expect(resolved.status).toBe("applied");
         expect(resolved.resolvedNote).toBe("fixed it");
         expect(await b.listPendingRefreshes(WS, true)).toHaveLength(0);
+      });
+    });
+
+    describe("remedy atoms", () => {
+      // Both editions must agree on identity, idempotency and the lifecycle, because the whole
+      // point of a fingerprint is that the same evidence is the same atom everywhere.
+      const atomFor = (over: Partial<Parameters<typeof stampProposedRemedy>[0]> = {}) => {
+        const src = "The icon renders blank after the theme flips.\nFixed by re-registering the template image.";
+        const input = {
+          variant: "trouble" as const,
+          condition_evidence: ["The icon renders blank after the theme flips"],
+          condition_normalized: null,
+          action_evidence: ["re-registering the template image"],
+          evidence_state: "OBSERVED_SUCCESS" as const,
+          source: { kind: "memory" as const, id: "mem-1", title: "Tray icon", node_path: "/packages/app" },
+          observed_at: "2026-09-01T00:00:00.000Z",
+          ...over,
+        };
+        const v = validateRemedyInput(input, src);
+        if (!v.ok) throw new Error(`fixture is not valid: ${v.code}`);
+        return stampProposedRemedy(v.value, { now: "2026-09-08T00:00:00.000Z" });
+      };
+
+      it("stores a proposal and lists it as pending", async () => {
+        const b = makeBackend();
+        const stored = await b.proposeRemedyAtom(WS, atomFor());
+        expect(stored.status).toBe("proposed");
+        expect(stored.authority).toBe("inferred");
+
+        const pending = await b.listProposedRemedyAtoms(WS);
+        expect(pending).toHaveLength(1);
+        expect(pending[0]?.id).toBe(stored.id);
+        expect(pending[0]?.action_evidence).toEqual(["re-registering the template image"]);
+        expect(pending[0]?.source.title).toBe("Tray icon");
+      });
+
+      it("is idempotent on the same evidence", async () => {
+        const b = makeBackend();
+        const first = await b.proposeRemedyAtom(WS, atomFor());
+        const again = await b.proposeRemedyAtom(WS, atomFor());
+        expect(again.id).toBe(first.id);
+        expect(await b.listProposedRemedyAtoms(WS)).toHaveLength(1);
+      });
+
+      it("approve leaves the queue, keeps the evidence and records who", async () => {
+        const b = makeBackend();
+        const stored = await b.proposeRemedyAtom(WS, atomFor());
+        const approved = await b.decideRemedyAtom(WS, stored.id, "approve", "sertan");
+        expect(approved).toMatchObject({ status: "active", authority: "human", approved_by: "sertan" });
+        expect(approved.action_evidence).toEqual(stored.action_evidence);
+        expect(approved.source).toEqual(stored.source);
+        expect(await b.listProposedRemedyAtoms(WS)).toHaveLength(0);
+      });
+
+      it("reject leaves the queue and persists", async () => {
+        const b = makeBackend();
+        const stored = await b.proposeRemedyAtom(WS, atomFor());
+        const rejected = await b.decideRemedyAtom(WS, stored.id, "reject", "sertan");
+        expect(rejected.status).toBe("rejected");
+        expect(await b.listProposedRemedyAtoms(WS)).toHaveLength(0);
+        const forSubject = await b.listRemedyAtomsForSubject("memory", "mem-1");
+        expect(forSubject.map((atom) => atom.status)).toEqual(["rejected"]);
+      });
+
+      it("a rejected proposal does not come back from identical evidence", async () => {
+        const b = makeBackend();
+        const stored = await b.proposeRemedyAtom(WS, atomFor());
+        await b.decideRemedyAtom(WS, stored.id, "reject", "sertan");
+        // Re-analysis of the same memory produces the same fingerprint, so the queue stays empty.
+        await b.proposeRemedyAtom(WS, atomFor());
+        expect(await b.listProposedRemedyAtoms(WS)).toHaveLength(0);
+        expect(await b.listRemedyAtomsForSubject("memory", "mem-1")).toHaveLength(1);
+      });
+
+      it("different evidence is a different atom", async () => {
+        const b = makeBackend();
+        await b.proposeRemedyAtom(WS, atomFor());
+        await b.proposeRemedyAtom(WS, atomFor({ action_evidence: ["re-registering the template"] }));
+        expect(await b.listProposedRemedyAtoms(WS)).toHaveLength(2);
+      });
+
+      it("weak evidence is stored but never deliverable, even once approved", async () => {
+        const b = makeBackend();
+        const stored = await b.proposeRemedyAtom(WS, atomFor({ evidence_state: "ATTEMPTED" }));
+        const approved = await b.decideRemedyAtom(WS, stored.id, "approve", "sertan");
+        expect(isRemedyDeliverable(approved)).toBe(false);
+      });
+
+      it("deciding an unknown atom fails rather than inventing one", async () => {
+        const b = makeBackend();
+        await expect(b.decideRemedyAtom(WS, "no-such-atom", "approve", "sertan")).rejects.toThrow();
       });
     });
 

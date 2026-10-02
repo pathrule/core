@@ -52,6 +52,12 @@ export function subdirKnowledge(input: MultiClientInput): CompiledKnowledgeNode[
  * text stays untouched and the section is easy to locate and re-splice.
  */
 export function appendRootKnowledgeSection(body: string, input: MultiClientInput): string {
+  // Signature mode writes nothing but the signature, so the root knowledge does
+  // not get spliced into the client's turn-zero file either. It reaches the agent
+  // through the hook's per-prompt selection instead — which is the point: the
+  // file delivered ALL of it on every load, the hook delivers the slice the
+  // prompt asked for.
+  if (input.companionMode === "signature") return body;
   const root = rootKnowledge(input);
   if (!root) return body;
   return (
@@ -69,6 +75,10 @@ export function appendRootKnowledgeSection(body: string, input: MultiClientInput
  * end leaves the knowledge above it byte-identical.
  */
 export function appendTeamContextSection(body: string, input: MultiClientInput): string {
+  // Signature mode: the block travels on the hook index (`index.team_context`)
+  // and is delivered once per session on SessionStart. Appending it here too
+  // would put the same constant text in two channels.
+  if (input.companionMode === "signature") return body;
   const block = renderTeamContextBlock(input.teamContext);
   if (!block) return body;
   return `${body.trimEnd()}\n\n${block}`;
@@ -115,6 +125,21 @@ export function renderKnowledgeFiles(
   toPath: (dirPath: string, slug: string) => string | null,
   wrap?: (node: CompiledKnowledgeNode, body: string) => string,
 ): RenderedFile[] {
+  // Signature mode, for EVERY client at once: these are the nested AGENTS.md /
+  // CLAUDE.md / .mdc / .instructions.md files, and they are what users actually
+  // complained about — 13 directories of a repo they own, per client.
+  //
+  // Handled here rather than in each renderer on purpose. Codex is not one client
+  // but five: antigravity, grok, kimi and opencode all read AGENTS.md through the
+  // codex target (see skills/disk-detection.ts requiredTargetsForEngines), so a
+  // per-renderer fix would have had to be repeated and would rot the first time
+  // an engine was added.
+  //
+  // `knowledgeOwnedPaths` is deliberately NOT narrowed alongside this: emitting
+  // nothing stops the writes, but only complete ownership makes disk-writer sweep
+  // away what earlier versions already wrote.
+  if (input.companionMode === "signature") return [];
+
   const out: RenderedFile[] = [];
   for (const node of subdirKnowledge(input)) {
     const path = toPath(node.dir_path, knowledgeSlug(node.dir_path));

@@ -1,3 +1,5 @@
+import { compiledDeliveryPlan, deliveredMemoryBody, sourcedAdvisoryLines } from "./compiled-delivery.js";
+export { compiledDeliveryPlan, deliveredMemoryBody, type CompiledDeliveryInput } from "./compiled-delivery.js";
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Deterministic hook-index assembly. Builds the full HookIndex the offline hook
@@ -7,13 +9,21 @@
  * `better-sqlite3` import.
  *
  * `semantic_tags` are inferred (reusing shared `semanticTagsOrInfer`).
- * `block_pattern` / `symbols` / `enforcement` rule extraction, `fail_patterns`,
- * `promoted_rules_signature`, and `experiments` rely on curated/feature-flagged
- * data not available here and are intentionally omitted. Stub shapes match
- * @pathrule/shared/hook-supervisor.
+ *
+ * `enforcement` / `block_pattern` are compiled from the rule's CONSTRAINT atoms via
+ * the shared `compileRuleConstraints`, which is the SAME function the cloud path uses
+ * to produce the stored compiled form. One implementation, so the same constraint
+ * denies in every edition or in none; a deny that differs by edition is an indicator
+ * that cannot separate two cases with opposite fixes. The legacy in-prose
+ * `BLOCK_PATTERN:` marker is NOT read here, and no rule has ever carried one.
+ *
+ * `symbols`, `fail_patterns`, `promoted_rules_signature` and `experiments` still rely
+ * on curated/feature-flagged data not available here and stay omitted. Stub shapes
+ * match @pathrule/shared/hook-supervisor.
  */
 import { extractFilenameTokensFromPrompt } from "@pathrule/shared/hook-supervisor/matcher.js";
 import type {
+  AdvisoryStub,
   HookIndex,
   MemoryStub,
   RuleStub,
@@ -21,7 +31,12 @@ import type {
   SkillStub,
   WorkEpisodeStub,
 } from "@pathrule/shared/hook-supervisor/types.js";
+import type { RemedyAdvisory, SelectionAdvisory, ProcedureAdvisory, ContextAdvisory, RationaleAdvisory } from "@pathrule/shared/agent-ir/agent-ir.js";
+import { planCompiledDelivery } from "@pathrule/shared/agent-ir/compiled-delivery.js";
 import type { WorkEpisodeBrief } from "@pathrule/shared/intelligence/types.js";
+import { compileRuleConstraints } from "@pathrule/shared/knowledge/constraint.js";
+import { compileRuleChecks } from "@pathrule/shared/knowledge/check.js";
+import type { RuleAtom } from "@pathrule/shared/knowledge/atoms.js";
 import { semanticTagsOrInfer } from "@pathrule/shared/semantic-tags.js";
 import { createHash } from "node:crypto";
 import type { Warehouse } from "./inputs.js";
@@ -58,6 +73,8 @@ export interface HookRuleInput {
   /** Node paths this rule is attached to (via node_rules); empty for unattached. */
   node_paths: string[];
   semantic_tags?: string[] | null;
+  /** Parsed CONSTRAINT atoms. Compiled here; the caller does not decide authority. */
+  constraints?: RuleAtom[] | null;
 }
 export interface HookSkillInput {
   id: string;
@@ -92,6 +109,28 @@ export interface HookIndexInput {
   workEpisodes: WorkEpisodeBrief[];
   pendingRefreshCount: number;
   inProgressRefreshCount: number;
+  /**
+   * Approved, deliverable REMEDY advisories with their resolved scope, already projected by the
+   * engine-neutral Agent IR layer. Grouped here into path_advisories / project_advisories. Absent
+   * or empty means the index carries no advisories and the hook stays silent about remedies.
+   */
+  advisories?: RemedyAdvisory[];
+  selections?: SelectionAdvisory[];
+  procedures?: ProcedureAdvisory[];
+  contexts?: ContextAdvisory[];
+  rationales?: RationaleAdvisory[];
+  /**
+   * Atom ref -> id of the memory it was compiled from, for memory-sourced atoms only. This is what lets
+   * the completeness gate judge a memory's lines against the memory itself (see `compiledDeliveryPlan`).
+   * An atom missing here has no source to judge and keeps its additive delivery.
+   */
+  advisorySources?: Record<string, string>;
+  /**
+   * Rendered agent protocol, for a workspace that delivers it through the hook
+   * rather than the companion files. Omitted (or blank) leaves `protocol` off
+   * the index entirely, which is what keeps the hook silent about it.
+   */
+  protocol?: string;
 }
 
 function truncatePreview(text: string, n: number): string {
@@ -136,11 +175,19 @@ function buildSessionDigest(
  * context; delivery reads from it by id only for delta items. `content_hash` is
  * computed with the SAME function the index uses, so an item's warehouse hash and
  * index hash always agree — the delta gate relies on this.
+ *
+ * A memory the completeness gate cleared carries its compiled form as `body`, hashed
+ * as delivered, plus `compiled_refs` so the hook can tell when the same lines already
+ * reached the session through the advisory channel.
  */
 export function assembleWarehouse(input: HookIndexInput): Warehouse {
   const warehouse: Warehouse = {};
+  const plan = compiledDeliveryPlan(input);
   for (const m of input.memories) {
-    warehouse[m.id] = { type: "memory", title: m.title, body: m.content, content_hash: contentHash(m.content) };
+    const body = deliveredMemoryBody(m, plan);
+    warehouse[m.id] = { type: "memory", title: m.title, body, content_hash: contentHash(body) };
+    const compiled = plan.compiled.get(m.id);
+    if (compiled) warehouse[m.id]!.compiled_refs = compiled.refs;
   }
   for (const r of input.rules) {
     warehouse[r.id] = { type: "rule", title: r.name, body: r.content, content_hash: contentHash(r.content) };
@@ -153,6 +200,10 @@ export function assembleWarehouse(input: HookIndexInput): Warehouse {
 
 /** Assemble the full HookIndex (workspace_root left null — the CLI writer fills it). */
 export function assembleHookIndex(input: HookIndexInput): HookIndex {
+  const advisoryLines = sourcedAdvisoryLines(input);
+  const plan = planCompiledDelivery(advisoryLines, input.memories);
+  const bodyOf = new Map(input.memories.map((m) => [m.id, deliveredMemoryBody(m, plan)]));
+
   // ── memories → path_memories + filename_index (with body budget) ──
   const tokensByMemory = new Map<string, string[]>();
   for (const m of input.memories) {
@@ -160,8 +211,9 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
     if (tokens.length > 0) tokensByMemory.set(m.id, tokens);
   }
   // Body budget: only token-bearing memories ≤ per-body cap, smallest-first until total budget.
+  // Sized on what the body slot carries, so a memory delivered as its compiled form costs that.
   const bodyEligible = input.memories
-    .map((m) => ({ m, bytes: byteLength(m.content) }))
+    .map((m) => ({ m, bytes: byteLength(bodyOf.get(m.id) ?? m.content) }))
     .filter((e) => tokensByMemory.has(e.m.id) && e.bytes <= PER_BODY_BYTE_CAP)
     .sort((a, b) => a.bytes - b.bytes || a.m.id.localeCompare(b.m.id));
   const bodyIds = new Set<string>();
@@ -176,19 +228,23 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
   const filenameIndex: Record<string, string[]> = {};
   for (const m of [...input.memories].sort((a, b) => a.id.localeCompare(b.id))) {
     const tokens = tokensByMemory.get(m.id);
+    const body = bodyOf.get(m.id) ?? m.content;
     const stub: MemoryStub = {
       id: m.id,
       title: m.title,
+      // The preview stays the memory's own words: it is a name-tier hint, and the compiled form's
+      // first line is the same marker for every compiled memory.
       preview: truncatePreview(m.content, PREVIEW_CHARS),
       node_path: m.node_path,
-      content_hash: contentHash(m.content),
+      // Hashed as delivered, matching assembleWarehouse, so the delta gate sees one version per memory.
+      content_hash: contentHash(body),
       semantic_tags: semanticTagsOrInfer(m.semantic_tags, {
         text: `${m.title} ${m.content.slice(0, 1000)}`,
         path: m.node_path,
       }),
     };
     if (tokens) stub.filename_tokens = tokens;
-    if (bodyIds.has(m.id)) stub.body = m.content;
+    if (bodyIds.has(m.id)) stub.body = body;
     (pathMemories[m.node_path] ??= []).push(stub);
     for (const t of tokens ?? []) (filenameIndex[t] ??= []).push(m.id);
   }
@@ -210,6 +266,30 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
         path: null,
       }),
     };
+    // Only a human-approved, active atom compiles.
+    //
+    // `enforcement` is ALWAYS emitted, defaulting to "advisory", because the cloud SQL
+    // builder emits `COALESCE(r.enforcement, 'advisory')` unconditionally. Omitting the
+    // key here made an unconstrained rule's stub differ between editions on a field a
+    // deny gate reads. Measured, not assumed: cloud produced
+    // {"block_pattern":null,"enforcement":"advisory"} where this produced
+    // {"block_pattern":null,"enforcement":null}.
+    //
+    // Known remaining divergence, tracked as debt in
+    // docs/agent-knowledge-constraint-parity.md: a rule whose CLOUD `rules.enforcement`
+    // column says 'strict' without carrying a constraint atom still differs, because
+    // there is no such column in the local schema. That is the stored-column-versus-
+    // compiled-value split, deliberately left alone here.
+    // `r.content` is the grounding gate's second half: a compiler-verified atom only
+    // compiles while the body it was proved against still contains its source excerpt.
+    // Passing the rule's own stored content here is what makes the guarantee independent
+    // of which mutation path last wrote it.
+    const compiled = compileRuleConstraints(r.constraints, r.content);
+    base.enforcement = compiled ? compiled.enforcement : "advisory";
+    if (compiled?.block_pattern) base.block_pattern = compiled.block_pattern;
+    if (compiled?.block_path) base.block_path = compiled.block_path;
+    const check = compileRuleChecks(r.constraints);
+    if (check) base.required_check = check;
     if (r.scope_type === "project") {
       projectRules.push(base);
     } else {
@@ -295,6 +375,25 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
     .slice(0, 8)
     .map(([path, count]) => ({ path, count }));
 
+  // ── advisories (REMEDY) → path_advisories + project_advisories ──
+  // Group approved advisories by their resolved scope. Input order is preserved (the backend sorts
+  // strongest+most-recent first), so within a scope the strongest advisory renders first. A null
+  // scope is workspace-global. Purely mechanical: no model, no re-ranking.
+  // V31: REMEDY, then SELECTION, then PROCEDURE stubs merge into the SAME scope-keyed maps, so all
+  // three advisory kinds deliver through the existing hook injection with no hook change, and the
+  // per-scope order (remedy > selection > procedure) matches the Agent IR presentation precedence.
+  // The completeness gate decides per source memory: a memory sent back to its source text contributes
+  // no lines at all, and a cleared memory's lines carry its id as `group` so they travel together.
+  const pathAdvisories: Record<string, AdvisoryStub[]> = {};
+  const projectAdvisories: AdvisoryStub[] = [];
+  for (const l of advisoryLines) {
+    if (plan.withheldRefs.has(l.ref)) continue;
+    const stub: AdvisoryStub = { ref: l.ref, line: l.line };
+    if (l.sourceMemoryId && plan.compiled.has(l.sourceMemoryId)) stub.group = l.sourceMemoryId;
+    if (l.scope && l.scope.trim()) (pathAdvisories[l.scope] ??= []).push(stub);
+    else projectAdvisories.push(stub);
+  }
+
   const index: HookIndex = {
     schema_version: 2,
     workspace_id: input.workspaceId,
@@ -312,10 +411,15 @@ export function assembleHookIndex(input: HookIndexInput): HookIndex {
     pending_refresh_count: input.pendingRefreshCount,
     in_progress_refresh_count: input.inProgressRefreshCount,
   };
+  if (Object.keys(pathAdvisories).length > 0) index.path_advisories = pathAdvisories;
+  if (projectAdvisories.length > 0) index.project_advisories = projectAdvisories;
   if (Object.keys(filenameIndex).length > 0) index.filename_index = filenameIndex;
   if (Object.keys(skillIndex).length > 0) index.skill_invocation_index = skillIndex;
   if (Object.keys(pathSkills).length > 0) index.path_skills = pathSkills;
   if (workEpisodeIndex.length > 0) index.work_episode_index = workEpisodeIndex;
   if (hotPaths.length > 0) index.hot_paths = hotPaths;
+  if (typeof input.protocol === "string" && input.protocol.trim().length > 0) {
+    index.protocol = input.protocol;
+  }
   return index;
 }

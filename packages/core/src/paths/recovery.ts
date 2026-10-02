@@ -58,6 +58,13 @@ export interface Leftover {
    * and a merge decision is needed.
    */
   liveFileIsPathruleOnly: boolean;
+  /**
+   * True when the BACKUP itself holds user content. False means Pathrule backed
+   * up its own output, so there is nothing to recover and restoring it would
+   * write stale Pathrule bytes into the user's file as if they were the user's.
+   * Such a leftover is offered for deletion, never for restore.
+   */
+  carriesUserContent: boolean;
   /** First line of the backup, to show the user what it is. */
   preview: string;
 }
@@ -68,6 +75,12 @@ export interface RecoveryPlan {
   restorable: Leftover[];
   /** Leftovers whose live file already has user content: needs a human choice. */
   needsChoice: Leftover[];
+  /**
+   * Leftovers that are Pathrule's own output. Nothing to recover: the only
+   * sensible offer is to delete them. Kept as its own bucket rather than folded
+   * into `restorable` so a UI cannot present junk as the user's lost work.
+   */
+  discardable: Leftover[];
 }
 
 /** "packages/api/backup.CLAUDE.md" → "packages/api/CLAUDE.md" */
@@ -94,6 +107,23 @@ function vaultBackupTarget(path: string): string | null {
   const inner = path.slice(prefix.length).replace(/\.\d+$/, "");
   const base = inner.slice(inner.lastIndexOf("/") + 1);
   return INSTRUCTION_BASENAMES.has(base) ? inner : null;
+}
+
+/**
+ * True when this body holds nothing of the USER's: it is entirely Pathrule's
+ * output, or a shell whose only content is a Pathrule region.
+ *
+ * One predicate for two questions that used to be asked differently. Applied to
+ * the LIVE file it answers "is restoring purely additive". Applied to the BACKUP
+ * it answers "is there anything here worth restoring at all", and skipping that
+ * second use is how seven byte-identical copies of Pathrule's own output came to
+ * be offered as the user's lost work.
+ */
+function holdsNoUserContent(content: string | undefined): boolean {
+  if (content === undefined) return true;
+  if (isEntirelyPathrule(content)) return true;
+  if (hasRegion(content) && stripRegion(content).trim() === "") return true;
+  return isPathruleManaged(content) && !hasRegion(content);
 }
 
 function firstMeaningfulLine(content: string): string {
@@ -124,17 +154,14 @@ export function buildRecoveryPlan(files: readonly ScannedFile[]): RecoveryPlan {
     const live = restoresTo === null ? undefined : byPath.get(restoresTo);
 
     // No live file at all, or a live file that holds nothing of the user's.
-    const liveFileIsPathruleOnly =
-      live === undefined ||
-      isEntirelyPathrule(live) ||
-      (hasRegion(live) && stripRegion(live).trim() === "") ||
-      (isPathruleManaged(live) && !hasRegion(live));
+    const liveFileIsPathruleOnly = holdsNoUserContent(live);
 
     leftovers.push({
       kind: strayTarget !== null ? "stray_backup" : "vault_backup",
       path: file.path,
       restoresTo,
       liveFileIsPathruleOnly,
+      carriesUserContent: !holdsNoUserContent(file.content),
       preview: firstMeaningfulLine(file.content),
     });
   }
@@ -142,8 +169,9 @@ export function buildRecoveryPlan(files: readonly ScannedFile[]): RecoveryPlan {
   leftovers.sort((a, b) => a.path.localeCompare(b.path));
   return {
     leftovers,
-    restorable: leftovers.filter((l) => l.liveFileIsPathruleOnly),
-    needsChoice: leftovers.filter((l) => !l.liveFileIsPathruleOnly),
+    restorable: leftovers.filter((l) => l.carriesUserContent && l.liveFileIsPathruleOnly),
+    needsChoice: leftovers.filter((l) => l.carriesUserContent && !l.liveFileIsPathruleOnly),
+    discardable: leftovers.filter((l) => !l.carriesUserContent),
   };
 }
 
@@ -156,6 +184,10 @@ export function buildRecoveryPlan(files: readonly ScannedFile[]): RecoveryPlan {
  * has user content, this returns null rather than guessing at a merge.
  */
 export function restoredBody(leftover: Leftover, backupContent: string): string | null {
+  // Belt and braces: the plan already keeps these out of `restorable`, but a
+  // caller holding a stale plan must not be able to write Pathrule's own old
+  // bytes back into the user's file.
+  if (!leftover.carriesUserContent) return null;
   if (!leftover.liveFileIsPathruleOnly) return null;
   const body = backupContent.replace(/\n+$/, "");
   return body === "" ? "" : `${body}\n`;

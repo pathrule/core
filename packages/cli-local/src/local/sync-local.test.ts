@@ -59,17 +59,23 @@ describe("syncLocalWorkspace", () => {
       ).toBe(true);
     }
 
-    // 3. Static protocol rules file (no backend, no CLAUDE.md render).
-    const protocol = readFileSync(join(cwd, ".claude/rules/pathrule-protocol.md"), "utf8");
-    expect(protocol).toContain("Pathrule");
+    // 3. Signature mode (default since 2026-09-01): the protocol is NOT a file in
+    //    the user's repo any more. The hook delivers it, so the file must be
+    //    absent — and its absence is only safe because the index carries it, which
+    //    is asserted right below. Checking one without the other is how a
+    //    workspace ends up with no protocol anywhere.
+    expect(existsSync(join(cwd, ".claude/rules/pathrule-protocol.md"))).toBe(false);
 
-    // 4. Offline hook-index warmed from the local store.
+    // 4. Offline hook-index warmed from the local store — and carrying the protocol.
     expect(result.hook_index.ok).toBe(true);
     const index = JSON.parse(
       readFileSync(join(home, "cache", "ws-sync-local", "hook-index.json"), "utf8"),
-    ) as { workspace_id?: string; workspace_root?: string };
+    ) as { workspace_id?: string; workspace_root?: string; protocol?: string };
     expect(index.workspace_id).toBe("ws-sync-local");
     expect(index.workspace_root).toBe(cwd);
+    expect(index.protocol, "the hook index must carry what the file stopped carrying").toContain(
+      "Pathrule",
+    );
 
     // Managed-file ownership recorded for repair/uninstall.
     expect(existsSync(join(cwd, ".pathrule/managed-files.json"))).toBe(true);
@@ -109,18 +115,23 @@ describe("syncLocalWorkspace", () => {
 
     expect(result.ok).toBe(true);
     expect(result.companion.ok).toBe(true);
-    expect(result.companion.written).toBeGreaterThan(0);
 
-    // Root-scoped knowledge → .claude/rules/pathrule-knowledge.md.
-    const rootKnowledge = readFileSync(
-      join(cwd, ".claude/rules/pathrule-knowledge.md"),
+    // Signature mode: knowledge no longer becomes files in the user's repo. This
+    // test used to assert the opposite — root knowledge into
+    // .claude/rules/pathrule-knowledge.md and path knowledge into src/CLAUDE.md.
+    // Users asked us to stop writing into their checkout, and the hook delivers
+    // the same knowledge per prompt instead, selected rather than loaded whole.
+    expect(existsSync(join(cwd, ".claude/rules/pathrule-knowledge.md"))).toBe(false);
+    expect(existsSync(join(cwd, "src/CLAUDE.md"))).toBe(false);
+
+    // The knowledge itself is still compiled and reachable — it moved channel, it
+    // was not dropped. The warehouse the hook reads bodies from is the proof.
+    const warehouse = readFileSync(
+      join(home, "cache", ws.workspaceId, "warehouse.json"),
       "utf8",
     );
-    expect(rootKnowledge).toContain("Root convention");
-
-    // Path-scoped knowledge → src/CLAUDE.md (Claude Code's native lazy-load channel).
-    const srcClaudeMd = readFileSync(join(cwd, "src/CLAUDE.md"), "utf8");
-    expect(srcClaudeMd).toContain("Src module rule");
+    expect(warehouse).toContain("Root convention");
+    expect(warehouse).toContain("Src module rule");
   });
 
   it("is idempotent — a second run rewrites nothing", async () => {
