@@ -40,6 +40,17 @@ export interface StudioMcpServerSummary {
   origin?: "user" | "project" | "plugin";
 }
 
+/** What Studio's one-time `~/.claude.json` recovery (the v0.24.0 config race)
+ *  put back on this launch. Counts only, so it is safe across IPC. */
+export interface ClaudeConfigRecoveryNotice {
+  /** The live file still ended in the torn tail and was trimmed. */
+  trimmed: boolean;
+  /** Claude projects restored from Claude Code's corrupted-config backups. */
+  projects: number;
+  /** MCP servers restored, user-level and project-level together. */
+  servers: number;
+}
+
 /** A Claude subagent definition discovered on disk (`.claude/agents/*.md`,
  *  `~/.claude/agents`, or an installed plugin's `agents/`). Shown in the Studio
  *  integrations panel's Agents tab. Read-only (defined by files / plugins). */
